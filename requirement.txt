@@ -1,52 +1,46 @@
+# Core LangChain
 langchain
 langchain-core
 langchain-community
+langchain-text-splitters
 
-# LLM Providers
-
-langchain-openai
+# LLM Providers & Embeddings
 langchain-mistralai
-openai
 mistralai
-
-# Vector Database
-
-chromadb
-
-# Embedding Models
-
 sentence-transformers
 
-# Document Loaders dependencies
+# Vector Database
+chromadb
 
+# Document Loaders & Formats
 pypdf
+python-docx
+reportlab
+pandas
+numpy
 unstructured
 beautifulsoup4
 lxml
 
-# Text Processing
+# OCR & Image Processing
+pillow
+pytesseract
 
-tiktoken
+# Web Search & Fallbacks
+duckduckgo-search
+wikipedia
 
-# Environment Variables
+# Voice (STT & Neural TTS)
+SpeechRecognition
+edge-tts
+pygame
+pyttsx3
+pypiwin32
+comtypes
 
+# UI Framework & Utilities
+customtkinter
 python-dotenv
-
-# Data Handling
-
-pandas
-numpy
-
-# API / App Layer (optional but common in RAG apps)
-
-fastapi
-uvicorn
-
-# UI (optional)
-
-streamlit
-
-# Utilities
-
-tqdm
+tiktoken
 requests
+tqdm
