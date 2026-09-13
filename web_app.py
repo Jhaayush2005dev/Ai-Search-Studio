@@ -1,5 +1,5 @@
-"""HTTP entry point for hosting AI Search Studio on Render."""
-
+import os
+import logging
 from threading import Lock
 from typing import Any
 
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from core.rag_engine import RAGEngine
 
+logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="AI Search Studio", version="1.0.0")
 _engine = RAGEngine()
@@ -36,6 +37,17 @@ def health() -> dict[str, str]:
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
+    # Ensure API key is configured
+    current_key = _engine.api_key or os.getenv("MISTRAL_API_KEY", "")
+    if not current_key:
+        raise HTTPException(
+            status_code=500,
+            detail="MISTRAL_API_KEY environment variable is not configured."
+        )
+    if not _engine.api_key and current_key:
+        _engine.api_key = current_key
+        _engine._init_models()
+
     answer_parts: list[str] = []
     citations: list[str] = []
 
@@ -47,7 +59,8 @@ def chat(request: ChatRequest) -> ChatResponse:
                 source_callback=lambda values: citations.extend(values),
             )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="The AI service could not answer this request.") from exc
+        logger.error(f"Chat generation error: {exc}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"AI service error: {str(exc)}") from exc
 
     return ChatResponse(answer=answer or "".join(answer_parts), citations=citations)
 
