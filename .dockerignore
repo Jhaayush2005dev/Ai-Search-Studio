@@ -1,0 +1,14 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.git/
+.gitignore
+.env
+chroma_db/
+chat_sessions/
+New folder/
+*.mp3
+.vscode/
+build/
+dist/
