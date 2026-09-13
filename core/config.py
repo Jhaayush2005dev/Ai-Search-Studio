@@ -5,7 +5,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Base Paths
-ROOT_DIR = Path(__file__).resolve().parent.parent
+# Use the executable directory for PyInstaller builds so user configuration and
+# runtime data live beside the app instead of inside its bundled internals.
+if getattr(sys, "frozen", False):
+    ROOT_DIR = Path(sys.executable).resolve().parent
+else:
+    ROOT_DIR = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT_DIR / "documents loaders"
 CHROMA_DIR = ROOT_DIR / "chroma_db"
 SESSIONS_DIR = ROOT_DIR / "chat_sessions"
