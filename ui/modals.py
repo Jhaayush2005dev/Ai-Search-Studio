@@ -7,7 +7,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 from PIL import Image
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
+from datetime import datetime
 
 from core.config import get_theme_colors
 
@@ -1079,3 +1080,459 @@ class ExportChatModal(ctk.CTkToplevel):
         content = "\n".join(lines)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
+
+
+class ChatHistoryModal(ctk.CTkToplevel):
+    """Modern modal for browsing, searching, managing, and activating past chat sessions."""
+
+    def __init__(
+        self,
+        master,
+        session_manager,
+        current_session_id: Optional[str] = None,
+        on_activate_session: Optional[Callable[[str], None]] = None,
+        on_new_chat: Optional[Callable[[], None]] = None
+    ):
+        super().__init__(master)
+        self.master = master
+        self.session_manager = session_manager
+        self.current_session_id = current_session_id
+        self.on_activate_session = on_activate_session
+        self.on_new_chat = on_new_chat
+        self.colors = get_theme_colors()
+
+        self.title("🕒 Chat History & Saved Sessions")
+
+        # Responsive geometry
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        w = min(740, max(360, screen_w - 40))
+        h = min(720, max(440, screen_h - 60))
+        self.geometry(f"{w}x{h}")
+        self.minsize(min(340, w), min(380, h))
+        self.attributes("-topmost", True)
+        self.focus_force()
+        self.configure(fg_color=self.colors["bg_base"])
+
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self._build_ui()
+        self._refresh_sessions()
+
+    def _build_ui(self):
+        # 1. Header Area
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=18, pady=(16, 8))
+
+        top_row = ctk.CTkFrame(header, fg_color="transparent")
+        top_row.pack(fill="x")
+
+        title_lbl = ctk.CTkLabel(
+            top_row,
+            text="🕒 Chat History & Past Sessions",
+            font=("Segoe UI", 16, "bold"),
+            text_color=self.colors["text_primary"]
+        )
+        title_lbl.pack(side="left")
+
+        # Quick Actions on Right
+        header_actions = ctk.CTkFrame(top_row, fg_color="transparent")
+        header_actions.pack(side="right")
+
+        btn_new = ctk.CTkButton(
+            header_actions,
+            text="➕ New Chat",
+            font=("Segoe UI", 11, "bold"),
+            height=28,
+            width=95,
+            fg_color=self.colors["accent_primary"],
+            hover_color=self.colors["accent_hover"],
+            command=self._handle_new_chat
+        )
+        btn_new.pack(side="left", padx=(0, 6))
+
+        btn_clear_all = ctk.CTkButton(
+            header_actions,
+            text="🗑️ Clear All",
+            font=("Segoe UI", 11),
+            height=28,
+            width=85,
+            fg_color=self.colors["chip_bg"],
+            hover_color=self.colors["chip_hover"],
+            text_color=self.colors["text_secondary"],
+            command=self._handle_clear_all
+        )
+        btn_clear_all.pack(side="left")
+
+        subtitle_lbl = ctk.CTkLabel(
+            header,
+            text="Click 'Activate' or double-click any past conversation to restore it to your current screen and continue working.",
+            font=("Segoe UI", 11),
+            text_color=self.colors["text_muted"],
+            anchor="w",
+            justify="left"
+        )
+        subtitle_lbl.pack(fill="x", pady=(4, 8))
+
+        # 2. Search & Toolbar
+        search_bar = ctk.CTkFrame(
+            header,
+            fg_color=self.colors["bg_sidebar"],
+            corner_radius=8,
+            border_width=1,
+            border_color=self.colors["border_color"]
+        )
+        search_bar.pack(fill="x", pady=(0, 2))
+
+        search_icon = ctk.CTkLabel(
+            search_bar,
+            text="🔍",
+            font=("Segoe UI", 12),
+            text_color=self.colors["text_muted"]
+        )
+        search_icon.pack(side="left", padx=(10, 4))
+
+        self.search_entry = ctk.CTkEntry(
+            search_bar,
+            placeholder_text="Search conversation titles, questions, or keywords...",
+            font=("Segoe UI", 11),
+            fg_color="transparent",
+            border_width=0,
+            height=32,
+            text_color=self.colors["text_primary"]
+        )
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=4, pady=3)
+        self.search_entry.bind("<KeyRelease>", lambda e: self._refresh_sessions())
+
+        self.clear_search_btn = ctk.CTkButton(
+            search_bar,
+            text="✕",
+            font=("Segoe UI", 10, "bold"),
+            width=24,
+            height=24,
+            corner_radius=4,
+            fg_color="transparent",
+            hover_color=self.colors["chip_hover"],
+            text_color=self.colors["text_muted"],
+            command=self._clear_search
+        )
+        self.clear_search_btn.pack(side="right", padx=6)
+
+        # 3. Sessions Count Badge Bar
+        count_bar = ctk.CTkFrame(self, fg_color="transparent")
+        count_bar.pack(fill="x", padx=20, pady=(4, 6))
+
+        self.count_lbl = ctk.CTkLabel(
+            count_bar,
+            text="SAVED SESSIONS",
+            font=("Segoe UI", 9, "bold"),
+            text_color=self.colors["text_muted"]
+        )
+        self.count_lbl.pack(side="left")
+
+        # 4. Scrollable Sessions Container
+        self.sessions_scroll = ctk.CTkScrollableFrame(
+            self,
+            fg_color="transparent",
+            corner_radius=8
+        )
+        self.sessions_scroll.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        self.sessions_scroll.grid_columnconfigure(0, weight=1)
+
+    def _clear_search(self):
+        self.search_entry.delete(0, "end")
+        self._refresh_sessions()
+
+    def _format_date(self, iso_str: Optional[str]) -> str:
+        if not iso_str:
+            return ""
+        try:
+            dt = datetime.fromisoformat(iso_str)
+            now = datetime.now()
+            if dt.date() == now.date():
+                return f"Today, {dt.strftime('%I:%M %p')}"
+            elif (now.date() - dt.date()).days == 1:
+                return f"Yesterday, {dt.strftime('%I:%M %p')}"
+            else:
+                return dt.strftime("%b %d, %Y • %I:%M %p")
+        except Exception:
+            return str(iso_str)[:16]
+
+    def _refresh_sessions(self):
+        query = self.search_entry.get().strip() if hasattr(self, "search_entry") else ""
+        sessions = self.session_manager.list_sessions(search_query=query)
+
+        # Update count label
+        total_all = len(self.session_manager.list_sessions())
+        if query:
+            self.count_lbl.configure(text=f"FOUND {len(sessions)} OF {total_all} SESSIONS")
+        else:
+            self.count_lbl.configure(text=f"SAVED SESSIONS ({len(sessions)})")
+
+        for w in self.sessions_scroll.winfo_children():
+            w.destroy()
+
+        if not sessions:
+            empty_frame = ctk.CTkFrame(self.sessions_scroll, fg_color=self.colors["bg_sidebar"], corner_radius=10, border_width=1, border_color=self.colors["border_color"])
+            empty_frame.pack(fill="both", expand=True, padx=10, pady=30)
+
+            empty_icon = ctk.CTkLabel(empty_frame, text="💬", font=("Segoe UI", 42))
+            empty_icon.pack(pady=(30, 8))
+
+            empty_title = ctk.CTkLabel(
+                empty_frame,
+                text="No Saved Sessions Found" if not query else f"No matches for '{query}'",
+                font=("Segoe UI", 15, "bold"),
+                text_color=self.colors["text_primary"]
+            )
+            empty_title.pack(pady=(0, 4))
+
+            empty_desc = ctk.CTkLabel(
+                empty_frame,
+                text="Your conversations are automatically saved as you chat with AI Search Studio." if not query else "Try clearing your search keyword to view all past conversations.",
+                font=("Segoe UI", 11),
+                text_color=self.colors["text_muted"],
+                justify="center"
+            )
+            empty_desc.pack(pady=(0, 20))
+
+            if not query:
+                btn_start = ctk.CTkButton(
+                    empty_frame,
+                    text="➕ Start a New Chat",
+                    font=("Segoe UI", 11, "bold"),
+                    height=30,
+                    width=140,
+                    fg_color=self.colors["accent_primary"],
+                    hover_color=self.colors["accent_hover"],
+                    command=self._handle_new_chat
+                )
+                btn_start.pack(pady=(0, 25))
+            return
+
+        for sess in sessions:
+            self._render_session_card(sess)
+
+    def _render_session_card(self, sess: Dict[str, Any]):
+        sess_id = sess.get("id", "")
+        title = sess.get("title", "Untitled Session")
+        updated_at = sess.get("updated_at") or sess.get("created_at")
+        date_str = self._format_date(updated_at)
+        messages = sess.get("messages", [])
+        msg_count = len(messages)
+        is_active = (sess_id == self.current_session_id)
+
+        card_bg = self.colors["bg_sidebar"]
+        border_col = self.colors["accent_primary"] if is_active else self.colors["border_color"]
+        border_w = 2 if is_active else 1
+
+        card = ctk.CTkFrame(
+            self.sessions_scroll,
+            fg_color=card_bg,
+            corner_radius=10,
+            border_width=border_w,
+            border_color=border_col
+        )
+        card.pack(fill="x", pady=5, padx=2)
+
+        # 1. Top Row: Title, Active Badge, Date, Message Count
+        top_row = ctk.CTkFrame(card, fg_color="transparent")
+        top_row.pack(fill="x", padx=14, pady=(10, 4))
+
+        icon_lbl = ctk.CTkLabel(
+            top_row,
+            text="💬",
+            font=("Segoe UI", 13)
+        )
+        icon_lbl.pack(side="left", padx=(0, 6))
+
+        display_title = title if len(title) <= 45 else title[:42] + "..."
+        title_lbl = ctk.CTkLabel(
+            top_row,
+            text=display_title,
+            font=("Segoe UI", 12, "bold"),
+            text_color=self.colors["text_primary"],
+            anchor="w"
+        )
+        title_lbl.pack(side="left")
+
+        if is_active:
+            active_badge = ctk.CTkLabel(
+                top_row,
+                text="● CURRENT SCREEN",
+                font=("Segoe UI", 9, "bold"),
+                text_color="#ffffff",
+                fg_color=self.colors["accent_success"],
+                corner_radius=4,
+                padx=6,
+                pady=1
+            )
+            active_badge.pack(side="left", padx=(8, 0))
+
+        # Right metadata (count & date)
+        meta_box = ctk.CTkFrame(top_row, fg_color="transparent")
+        meta_box.pack(side="right")
+
+        count_badge = ctk.CTkLabel(
+            meta_box,
+            text=f"{msg_count} message{'s' if msg_count != 1 else ''}",
+            font=("Segoe UI", 9),
+            text_color=self.colors["text_muted"],
+            fg_color=self.colors["chip_bg"],
+            corner_radius=4,
+            padx=6,
+            pady=1
+        )
+        count_badge.pack(side="right", padx=(6, 0))
+
+        date_lbl = ctk.CTkLabel(
+            meta_box,
+            text=date_str,
+            font=("Segoe UI", 10),
+            text_color=self.colors["text_muted"]
+        )
+        date_lbl.pack(side="right")
+
+        # 2. Preview Row (First Query Snippet)
+        preview_text = ""
+        for m in messages:
+            if m.get("role") == "user" and m.get("content"):
+                preview_text = f"Q: {m['content'].strip().replace(chr(10), ' ')}"
+                break
+            elif m.get("role") == "ai" and m.get("content"):
+                preview_text = f"A: {m['content'].strip().replace(chr(10), ' ')}"
+                break
+
+        if not preview_text:
+            preview_text = "(Empty conversation)"
+
+        if len(preview_text) > 130:
+            preview_text = preview_text[:130] + "..."
+
+        preview_lbl = ctk.CTkLabel(
+            card,
+            text=preview_text,
+            font=("Segoe UI", 11),
+            text_color=self.colors["text_secondary"],
+            anchor="w",
+            justify="left",
+            wraplength=560
+        )
+        preview_lbl.pack(fill="x", padx=14, pady=(0, 8), anchor="w")
+
+        # 3. Actions Row
+        actions_bar = ctk.CTkFrame(card, fg_color="transparent")
+        actions_bar.pack(fill="x", padx=14, pady=(0, 10))
+
+        # Activate Button (Prominent)
+        activate_text = "⚡ Active Now" if is_active else "⚡ Activate / Load Session"
+        activate_fg = self.colors["accent_success"] if is_active else self.colors["accent_primary"]
+        activate_hover = self.colors["accent_hover"]
+
+        btn_activate = ctk.CTkButton(
+            actions_bar,
+            text=activate_text,
+            font=("Segoe UI", 11, "bold"),
+            height=28,
+            fg_color=activate_fg,
+            hover_color=activate_hover,
+            text_color="#ffffff",
+            command=lambda sid=sess_id: self._activate_session(sid)
+        )
+        btn_activate.pack(side="left", padx=(0, 8))
+
+        # Rename Button
+        btn_rename = ctk.CTkButton(
+            actions_bar,
+            text="✏️ Rename",
+            font=("Segoe UI", 10),
+            height=28,
+            width=75,
+            fg_color=self.colors["chip_bg"],
+            hover_color=self.colors["chip_hover"],
+            text_color=self.colors["text_secondary"],
+            command=lambda sid=sess_id, curr_t=title: self._handle_rename(sid, curr_t)
+        )
+        btn_rename.pack(side="left", padx=(0, 6))
+
+        # Export Button
+        if msg_count > 0:
+            btn_export = ctk.CTkButton(
+                actions_bar,
+                text="💾 Export",
+                font=("Segoe UI", 10),
+                height=28,
+                width=75,
+                fg_color=self.colors["chip_bg"],
+                hover_color=self.colors["chip_hover"],
+                text_color=self.colors["text_secondary"],
+                command=lambda msgs=messages: self._handle_export(msgs)
+            )
+            btn_export.pack(side="left", padx=(0, 6))
+
+        # Delete Button
+        btn_delete = ctk.CTkButton(
+            actions_bar,
+            text="🗑️ Delete",
+            font=("Segoe UI", 10),
+            height=28,
+            width=70,
+            fg_color="transparent",
+            hover_color=self.colors["chip_hover"],
+            text_color="#ef4444",
+            command=lambda sid=sess_id, t=title: self._handle_delete(sid, t)
+        )
+        btn_delete.pack(side="right")
+
+        # Double click anywhere on card to activate
+        def _on_double_click(event):
+            self._activate_session(sess_id)
+
+        card.bind("<Double-Button-1>", _on_double_click)
+        top_row.bind("<Double-Button-1>", _on_double_click)
+        title_lbl.bind("<Double-Button-1>", _on_double_click)
+        preview_lbl.bind("<Double-Button-1>", _on_double_click)
+
+    def _activate_session(self, session_id: str):
+        if self.on_activate_session:
+            self.on_activate_session(session_id)
+        self.destroy()
+
+    def _handle_new_chat(self):
+        if self.on_new_chat:
+            self.on_new_chat()
+        self.destroy()
+
+    def _handle_rename(self, session_id: str, current_title: str):
+        dialog = ctk.CTkInputDialog(
+            text=f"Enter a new title for this conversation:\n(Current: {current_title})",
+            title="Rename Chat Session"
+        )
+        new_title = dialog.get_input()
+        if new_title and new_title.strip():
+            self.session_manager.rename_session(session_id, new_title.strip())
+            self._refresh_sessions()
+
+    def _handle_export(self, messages: List[Dict[str, Any]]):
+        ExportChatModal(self.master, messages)
+
+    def _handle_delete(self, session_id: str, title: str):
+        if messagebox.askyesno("Delete Conversation", f"Are you sure you want to delete this chat session?\n\n'{title}'"):
+            self.session_manager.delete_session(session_id)
+            if session_id == self.current_session_id:
+                # If active session was deleted, start fresh
+                if self.on_new_chat:
+                    self.on_new_chat()
+            self._refresh_sessions()
+
+    def _handle_clear_all(self):
+        all_sessions = self.session_manager.list_sessions()
+        if not all_sessions:
+            messagebox.showinfo("Chat History", "History is already empty.")
+            return
+
+        if messagebox.askyesno("Clear All History", f"Are you sure you want to permanently delete all {len(all_sessions)} past chat sessions?\nThis action cannot be undone."):
+            self.session_manager.clear_all_sessions()
+            if self.on_new_chat:
+                self.on_new_chat()
+            self._refresh_sessions()

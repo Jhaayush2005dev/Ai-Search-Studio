@@ -163,8 +163,8 @@ class Sidebar(ctk.CTkFrame):
         ctrl_frame.grid(row=4, column=0, padx=16, pady=(6, 10), sticky="ew")
 
         # Search Mode
-        mode_lbl = ctk.CTkLabel(ctrl_frame, text="Search Mode", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
-        mode_lbl.pack(anchor="w", pady=(0, 2))
+        self.mode_lbl = ctk.CTkLabel(ctrl_frame, text="Search Mode", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
+        self.mode_lbl.pack(anchor="w", pady=(0, 2))
 
         self.mode_menu = ctk.CTkOptionMenu(
             ctrl_frame,
@@ -180,8 +180,8 @@ class Sidebar(ctk.CTkFrame):
         self.mode_menu.pack(fill="x", pady=(0, 6))
 
         # Model Selector
-        model_lbl = ctk.CTkLabel(ctrl_frame, text="AI Model", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
-        model_lbl.pack(anchor="w", pady=(0, 2))
+        self.model_lbl = ctk.CTkLabel(ctrl_frame, text="AI Model", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
+        self.model_lbl.pack(anchor="w", pady=(0, 2))
 
         self.model_menu = ctk.CTkOptionMenu(
             ctrl_frame,
@@ -200,8 +200,8 @@ class Sidebar(ctk.CTkFrame):
         slider_box = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         slider_box.pack(fill="x", pady=(0, 1))
 
-        depth_lbl = ctk.CTkLabel(slider_box, text="Retrieval Depth", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
-        depth_lbl.pack(side="left")
+        self.depth_lbl = ctk.CTkLabel(slider_box, text="Retrieval Depth", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
+        self.depth_lbl.pack(side="left")
 
         self.depth_val_lbl = ctk.CTkLabel(slider_box, text="4", font=("Segoe UI", 9, "bold"), text_color=self.colors["accent_primary"])
         self.depth_val_lbl.pack(side="right")
@@ -230,8 +230,8 @@ class Sidebar(ctk.CTkFrame):
         self.tts_switch.pack(anchor="w", pady=(2, 6))
 
         # Theme Selector
-        theme_lbl = ctk.CTkLabel(ctrl_frame, text="Interface Theme", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
-        theme_lbl.pack(anchor="w", pady=(0, 2))
+        self.theme_lbl = ctk.CTkLabel(ctrl_frame, text="Interface Theme", font=("Segoe UI", 9, "bold"), text_color=self.colors["text_muted"])
+        self.theme_lbl.pack(anchor="w", pady=(0, 2))
 
         self.theme_menu = ctk.CTkOptionMenu(
             ctrl_frame,
@@ -356,11 +356,46 @@ class Sidebar(ctk.CTkFrame):
         self.src_title.configure(text_color=colors["text_muted"])
         self.src_count_badge.configure(text_color=colors["text_muted"])
         self.sources_scroll.configure(fg_color=colors["bg_base"], border_color=colors["border_color"])
+
+        # Labels
+        if hasattr(self, "mode_lbl"):
+            self.mode_lbl.configure(text_color=colors["text_muted"])
+        if hasattr(self, "model_lbl"):
+            self.model_lbl.configure(text_color=colors["text_muted"])
+        if hasattr(self, "depth_lbl"):
+            self.depth_lbl.configure(text_color=colors["text_muted"])
+        if hasattr(self, "theme_lbl"):
+            self.theme_lbl.configure(text_color=colors["text_muted"])
+
+        # Menus & Controls
         self.mode_menu.configure(fg_color=colors["chip_bg"], button_color=colors["chip_hover"], text_color=colors["text_primary"])
         self.model_menu.configure(fg_color=colors["chip_bg"], button_color=colors["chip_hover"], text_color=colors["text_primary"])
         self.theme_menu.configure(fg_color=colors["chip_bg"], button_color=colors["chip_hover"], text_color=colors["text_primary"])
         self.depth_val_lbl.configure(text_color=colors["accent_primary"])
         self.depth_slider.configure(progress_color=colors["accent_primary"])
         self.tts_switch.configure(text_color=colors["text_secondary"], progress_color=colors["accent_primary"])
-        if active_sources is not None:
-            self.update_sources_list(active_sources)
+
+        # In-place source cards update without destroying/reconstructing widgets
+        if hasattr(self, "empty_label") and self.empty_label and self.empty_label.winfo_exists():
+            try:
+                self.empty_label.configure(text_color=colors["text_muted"])
+            except Exception:
+                pass
+
+        for card in self.sources_scroll.winfo_children():
+            if isinstance(card, ctk.CTkFrame):
+                try:
+                    card.configure(fg_color=colors["bg_card_ai"], border_color=colors["border_color"])
+                    for child in card.winfo_children():
+                        if isinstance(child, ctk.CTkFrame): # info_frame
+                            for lbl in child.winfo_children():
+                                if isinstance(lbl, ctk.CTkLabel):
+                                    # Main name vs meta info
+                                    if "chunks" in str(lbl.cget("text")):
+                                        lbl.configure(text_color=colors["text_muted"])
+                                    else:
+                                        lbl.configure(text_color=colors["text_primary"])
+                        elif isinstance(child, ctk.CTkButton): # del_btn
+                            child.configure(hover_color=colors["chip_hover"], text_color=colors["text_muted"])
+                except Exception:
+                    pass

@@ -1,7 +1,7 @@
 import os
 import time
 import threading
-from typing import List, Dict, Any, Generator, Optional, Callable
+from typing import List, Dict, Any, Generator, Optional, Callable, Tuple
 from pathlib import Path
 
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
@@ -154,6 +154,53 @@ class RAGEngine:
             "sources": self.active_sources_meta
         }
 
+    def retrieve_context_for_query(self, query: str, status_callback: Optional[Callable[[str], None]] = None) -> Tuple[str, List[str]]:
+        """Retrieves relevant document vectors and/or web search results for a given query."""
+        local_context = ""
+        citations = []
+
+        if self.search_mode in ["Auto (Hybrid)", "Docs Only"] and self.vector_store:
+            if status_callback:
+                status_callback("🔍 Searching vector database...")
+            try:
+                retrieved_docs = self.vector_store.similarity_search(query, k=self.context_depth)
+                if retrieved_docs:
+                    context_parts = []
+                    for doc in retrieved_docs:
+                        src = doc.metadata.get("source", "Document")
+                        citations.append(src)
+                        content = doc.page_content.strip()
+                        if len(content) > 1500:
+                            content = content[:1500] + "..."
+                        context_parts.append(f"--- SOURCE: {src} ---\n{content}")
+                    local_context = "\n\n".join(context_parts)
+            except Exception as e:
+                print(f"Vector search warning: {e}")
+
+        citations = list(dict.fromkeys(citations))
+
+        need_web_search = (self.search_mode == "Web Only")
+        if self.search_mode == "Auto (Hybrid)":
+            if not local_context or len(local_context.strip()) < 40:
+                need_web_search = True
+
+        web_context = ""
+        if need_web_search:
+            if status_callback:
+                status_callback("🌐 Querying live web search...")
+            web_results = self.web_service.search_text(query)
+            if web_results and not web_results.startswith("No "):
+                web_context = f"\n--- LIVE WEB RESULTS ---\n{web_results}\n"
+                citations.append("DuckDuckGo Web Search")
+
+        combined = []
+        if local_context:
+            combined.append(f"=== LOCAL DOCUMENTS CONTEXT ===\n{local_context}")
+        if web_context:
+            combined.append(f"=== LIVE WEB SEARCH CONTEXT ===\n{web_context}")
+
+        return "\n\n".join(combined), list(dict.fromkeys(citations))
+
     # ==========================================
     # STREAMING INFERENCE WITH 429 AUTO-RETRY & FALLBACK
     # ==========================================
@@ -171,7 +218,6 @@ class RAGEngine:
         self._is_generating = True
         self._abort_generation = False
         full_response = []
-        citations = []
 
         if not is_internet_available():
             msg = "⚠️ Network offline: Cannot connect to AI model or web."
@@ -180,56 +226,17 @@ class RAGEngine:
 
         try:
             # 1. Retrieve Context
-            local_context = ""
-            retrieved_docs = []
-
-            if self.search_mode in ["Auto (Hybrid)", "Docs Only"] and self.vector_store:
-                if status_callback:
-                    status_callback("🔍 Searching vector database...")
-                try:
-                    retrieved_docs = self.vector_store.similarity_search(query, k=self.context_depth)
-                    if retrieved_docs:
-                        context_parts = []
-                        for doc in retrieved_docs:
-                            src = doc.metadata.get("source", "Document")
-                            citations.append(src)
-                            # Keep each snippet concise to reduce token count
-                            content = doc.page_content.strip()
-                            if len(content) > 1500:
-                                content = content[:1500] + "..."
-                            context_parts.append(f"--- SOURCE: {src} ---\n{content}")
-                        local_context = "\n\n".join(context_parts)
-                except Exception as e:
-                    print(f"Vector search warning: {e}")
-
-            citations = list(dict.fromkeys(citations))
-
-            # 2. Check if Web Search is needed
-            need_web_search = (self.search_mode == "Web Only")
-            if self.search_mode == "Auto (Hybrid)":
-                if not local_context or len(local_context.strip()) < 40:
-                    need_web_search = True
-
-            web_context = ""
-            if need_web_search:
-                if status_callback:
-                    status_callback("🌐 Querying live web search...")
-                web_results = self.web_service.search_text(query)
-                web_context = f"\n--- LIVE WEB RESULTS ---\n{web_results}\n"
-                citations.append("DuckDuckGo Web Search")
+            context_text, citations = self.retrieve_context_for_query(query, status_callback=status_callback)
 
             if source_callback and citations:
                 source_callback(citations)
 
-            # 3. Construct System Prompt
+            # 2. Construct System Prompt
             system_prompt = f"""You are a helpful, concise AI Knowledge Assistant.
 Answer the user's question clearly based on the context below. If answering from documents or web search, highlight key facts.
+Whenever you mention websites, services, official apps, downloads, or online resources, always format them as active clickable Markdown links like [Website Name](https://actual-url.com) so the user can easily open them.
 
-{f'=== LOCAL DOCUMENTS CONTEXT ===' if local_context else ''}
-{local_context}
-
-{f'=== LIVE WEB SEARCH CONTEXT ===' if web_context else ''}
-{web_context}
+{context_text}
 """
             messages = [SystemMessage(content=system_prompt)]
 

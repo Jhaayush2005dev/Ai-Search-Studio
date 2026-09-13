@@ -12,19 +12,21 @@ from tkinter import filedialog, messagebox
 
 # Core Engine & Service Imports
 from core.config import (
-    DOCS_DIR, MISTRAL_API_KEY, get_theme_colors,
+    DOCS_DIR, MISTRAL_API_KEY, get_theme_colors, set_current_theme,
     is_internet_available, THEMES, SUPPORTED_EXTENSIONS
 )
 from core.doc_loader import UniversalDocumentLoader
 from core.rag_engine import RAGEngine
+from core.session_manager import SessionManager
+from core.vision_service import VisionService
 from core.voice_service import VoiceService
 from core.web_service import WebService
 
 # UI Components & Modals
 from ui.sidebar import Sidebar
 from ui.chat_view import ChatView
-from ui.components import StatusPill, PromptChip, ChatMessageCard, ModeActivationHUD, SearchInputBox
-from ui.modals import ImageViewerModal, KnowledgeStatsModal, ExportChatModal
+from ui.components import StatusPill, PromptChip, ChatMessageCard, ModeActivationHUD, SearchInputBox, AttachmentMenuPopup, get_mic_icon
+from ui.modals import ImageViewerModal, KnowledgeStatsModal, ExportChatModal, ChatHistoryModal
 
 # Set appearance default
 ctk.set_appearance_mode("dark")
@@ -68,8 +70,13 @@ class AISearchStudioApp(ctk.CTk):
         # Services & State
         self.doc_loader = UniversalDocumentLoader()
         self.rag_engine = RAGEngine(api_key=MISTRAL_API_KEY)
+        self.vision_service = VisionService(api_key=MISTRAL_API_KEY)
         self.voice_service = VoiceService()
         self.web_service = WebService()
+        self.session_manager = SessionManager()
+        self.current_session_id: Optional[str] = None
+        self.attached_image_path: Optional[str] = None
+        self.attached_image: Optional[Image.Image] = None
         self.auto_speak_enabled = False
         self.is_processing = False
 
@@ -79,8 +86,9 @@ class AISearchStudioApp(ctk.CTk):
         self._build_chat_area()
         self._build_input_area()
 
-        # Bind responsive layout resize
+        # Bind responsive layout resize & popup dismiss
         self.bind("<Configure>", self._on_window_configure)
+        self.bind("<ButtonPress-1>", self._on_global_click, add=True)
 
         # Apply initial responsive pass
         self.after(50, self._apply_responsive_layout)
@@ -168,6 +176,19 @@ class AISearchStudioApp(ctk.CTk):
         )
         self.export_btn.pack(side="right", padx=(0, 15), pady=10)
 
+        self.history_btn = ctk.CTkButton(
+            self.header_bar,
+            text="🕒 History",
+            font=("Segoe UI", 11, "bold"),
+            height=30,
+            width=90,
+            fg_color=self.colors["chip_bg"],
+            hover_color=self.colors["chip_hover"],
+            text_color=self.colors["text_primary"],
+            command=self.trigger_history_modal
+        )
+        self.history_btn.pack(side="right", padx=(0, 8), pady=10)
+
         self.clear_btn = ctk.CTkButton(
             self.header_bar,
             text="🧹 Clear Chat",
@@ -223,7 +244,41 @@ class AISearchStudioApp(ctk.CTk):
         self.progress_bar.pack(fill="x", pady=(0, 6))
         self.progress_bar.set(0)
 
-        # 3. Input Controls Bar
+        # 3. Attached Photo Preview Bar (Shown when an image is selected for Pixtral analysis)
+        self.image_preview_bar = ctk.CTkFrame(
+            self.bottom_panel,
+            fg_color=self.colors["chip_bg"],
+            corner_radius=8,
+            border_width=1,
+            border_color=self.colors["accent_primary"],
+            height=32
+        )
+        self.img_preview_thumb = ctk.CTkLabel(self.image_preview_bar, text="🖼️", font=("Segoe UI", 12))
+        self.img_preview_thumb.pack(side="left", padx=(8, 4), pady=4)
+
+        self.img_preview_label = ctk.CTkLabel(
+            self.image_preview_bar,
+            text="",
+            font=("Segoe UI", 11, "bold"),
+            text_color=self.colors["text_primary"]
+        )
+        self.img_preview_label.pack(side="left", padx=4, pady=4)
+
+        self.img_remove_btn = ctk.CTkButton(
+            self.image_preview_bar,
+            text="✕ Remove Photo",
+            font=("Segoe UI", 10),
+            height=22,
+            width=85,
+            corner_radius=4,
+            fg_color="transparent",
+            hover_color=self.colors["chip_hover"],
+            text_color=self.colors["accent_danger"],
+            command=self.clear_attached_image
+        )
+        self.img_remove_btn.pack(side="right", padx=6, pady=4)
+
+        # 4. Input Controls Bar
         self.input_card = ctk.CTkFrame(
             self.bottom_panel,
             fg_color=self.colors["bg_input"],
@@ -234,7 +289,7 @@ class AISearchStudioApp(ctk.CTk):
         self.input_card.pack(fill="x")
         self.input_card.grid_columnconfigure(1, weight=1)
 
-        # Attach File Button (+)
+        # Attach / Menu Button (+) -> Opens Gemini & ChatGPT style attachment menu
         self.attach_btn = ctk.CTkButton(
             self.input_card,
             text="+",
@@ -245,7 +300,7 @@ class AISearchStudioApp(ctk.CTk):
             fg_color="transparent",
             hover_color=self.colors["chip_hover"],
             text_color=self.colors["text_secondary"],
-            command=self.trigger_file_upload
+            command=self.show_attachment_menu
         )
         self.attach_btn.grid(row=0, column=0, padx=(6, 2), pady=6)
 
@@ -257,17 +312,17 @@ class AISearchStudioApp(ctk.CTk):
         )
         self.query_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
 
-        # Microphone STT Button
+        # Microphone STT Button (Modern Studio / Voice Search Icon)
+        self.mic_icon = get_mic_icon(self.colors["text_secondary"], size=(20, 20))
         self.mic_btn = ctk.CTkButton(
             self.input_card,
-            text="🎤",
-            font=("Segoe UI", 15),
+            image=self.mic_icon,
+            text="",
             width=40,
             height=40,
             corner_radius=8,
             fg_color="transparent",
             hover_color=self.colors["chip_hover"],
-            text_color=self.colors["text_secondary"],
             command=self.toggle_voice_stt
         )
         self.mic_btn.grid(row=0, column=2, padx=2, pady=6)
@@ -285,6 +340,17 @@ class AISearchStudioApp(ctk.CTk):
             command=self.send_user_query
         )
         self.send_btn.grid(row=0, column=3, padx=(4, 6), pady=6)
+
+        # 5. Floating Attachment Menu Card (Gemini / ChatGPT Style)
+        self.attachment_popup = AttachmentMenuPopup(
+            self.main_container,
+            on_upload_photo=self.trigger_image_upload,
+            on_upload_files=self.trigger_file_upload,
+            on_search_image=self._quick_image_search_prompt,
+            on_summarize=lambda: self.run_quick_ai_tool("summary"),
+            on_quiz=lambda: self.run_quick_ai_tool("quiz"),
+            on_state_change=self._on_attachment_menu_state_change
+        )
 
     # ==========================================
     # RESPONSIVE ADAPTIVE LAYOUT & DRAWER
@@ -328,6 +394,7 @@ class AISearchStudioApp(ctk.CTk):
                     self.status_pill.set_compact(True)
 
                     self.export_btn.configure(text="💾", width=34)
+                    self.history_btn.configure(text="🕒", width=34)
                     self.clear_btn.configure(text="🧹", width=34)
 
                     # Input Mobile Layout
@@ -355,6 +422,7 @@ class AISearchStudioApp(ctk.CTk):
                     self.status_pill.set_compact(False)
 
                     self.export_btn.configure(text="💾 Export Chat", width=100)
+                    self.history_btn.configure(text="🕒 History", width=90)
                     self.clear_btn.configure(text="🧹 Clear Chat", width=90)
 
                     # Input Desktop Layout
@@ -436,7 +504,6 @@ class AISearchStudioApp(ctk.CTk):
                     self.rag_engine.add_documents(chunks, meta)
                     self._safe_ui(lambda: self.sidebar.update_sources_list(self.rag_engine.active_sources_meta))
                     self._safe_ui(lambda: self.status_pill.set_status(f"🟢 Ready ({len(chunks)} Chunks)", "success"))
-                    self._safe_ui(lambda: self.chat_view.add_system_notice(f"✅ Loaded {len(meta)} local files ({len(chunks)} total vector chunks ready)."))
                 else:
                     self._safe_ui(lambda: self.status_pill.set_status("🟡 Web Search Ready", "warning"))
             else:
@@ -461,18 +528,33 @@ class AISearchStudioApp(ctk.CTk):
             return
 
         query = self.query_entry.get().strip()
+
+        # Handle Attached Image for Pixtral Multimodal Analysis
+        if self.attached_image is not None:
+            img_to_analyze = self.attached_image
+            display_query = query if query else "Answer and explain this photo in detail."
+            self.query_entry.delete(0, "end")
+            self.chat_view.add_user_message(display_query, image=img_to_analyze)
+            self.voice_service.stop_speaking()
+            self.clear_attached_image()
+            self._auto_save_current_session()
+            threading.Thread(target=self._pixtral_query_worker, args=(img_to_analyze, display_query), daemon=True).start()
+            return
+
         if not query:
             return
 
         self.query_entry.delete(0, "end")
         self.chat_view.add_user_message(query)
         self.voice_service.stop_speaking()
+        self._auto_save_current_session()
 
         # Handle Browsing & URL Navigation Intent (e.g. "open youtube", "youtube.com", "open github for langchain", "google quantum computing")
         nav_target = self.web_service.resolve_browsing_intent(query)
         if nav_target:
             target_url, display_title = nav_target
             self.chat_view.add_system_notice(f"🌐 Opening {display_title} in your browser...\n🔗 {target_url}")
+            self._auto_save_current_session()
             if self.auto_speak_enabled:
                 self.voice_service.speak(f"Opening {display_title} in your browser.")
             threading.Thread(
@@ -536,14 +618,16 @@ class AISearchStudioApp(ctk.CTk):
 
             # Finalize formatting and citations
             self._safe_ui(lambda: self.chat_view.finalize_last_ai_message(final_response, citations_received))
+            self._safe_ui(self._auto_save_current_session)
             self._safe_ui(lambda: self.status_pill.set_status("🟢 Ready", "success"))
 
             # Auto TTS if enabled
             if self.auto_speak_enabled and final_response:
-                self.voice_service.speak(final_response)
+                self._safe_ui(lambda: self.speak_text(final_response, ai_card))
 
         except Exception as e:
             self._safe_ui(lambda err=e: self.chat_view.add_system_notice(f"❌ Error during response: {err}"))
+            self._safe_ui(self._auto_save_current_session)
         finally:
             self._set_progress(stop=True)
             self._set_generating_state(False)
@@ -560,6 +644,7 @@ class AISearchStudioApp(ctk.CTk):
                     card = self.chat_view.add_ai_message(f"Here is the image found for '{query}':")
                     card.attach_image(img, query)
                     card.set_citations([url] if url else ["Web Search"])
+                    self._auto_save_current_session()
                 self._safe_ui(render_img)
                 self._safe_ui(lambda: self.status_pill.set_status("🟢 Ready", "success"))
             else:
@@ -570,6 +655,122 @@ class AISearchStudioApp(ctk.CTk):
         finally:
             self._set_progress(stop=True)
             self._set_generating_state(False)
+
+    def _pixtral_query_worker(self, image_input, prompt: str):
+        self._set_generating_state(True)
+        self._set_progress(start=True)
+        self._safe_ui(lambda: self.status_pill.set_status("🖼️ Analyzing Image & Solving...", "warning"))
+
+        # Create new AI chat message card in main thread
+        card_event = threading.Event()
+        ai_card_container = []
+        def create_card():
+            try:
+                card = self.chat_view.add_ai_message("")
+                ai_card_container.append(card)
+            finally:
+                card_event.set()
+        self.after(0, create_card)
+
+        card_event.wait(timeout=5.0)
+        if not ai_card_container:
+            self._set_progress(stop=True)
+            self._set_generating_state(False)
+            return
+        ai_card = ai_card_container[0]
+
+        def on_token(token: str):
+            self._safe_ui(lambda: ai_card.append_token(token))
+            self._safe_ui(self.chat_view.scroll_to_bottom)
+
+        def on_status(status_msg: str):
+            self._safe_ui(lambda: self.status_pill.set_status(status_msg, "warning"))
+
+        try:
+            search_context = ""
+            citations = ["Mistral Pixtral Vision (pixtral-12b-2409)"]
+
+            clean_p = prompt.strip() if prompt else ""
+            default_prompts = [
+                "analyze and describe this photo in detail.",
+                "answer and explain this photo in detail.",
+                "analyze this photo",
+                "describe this photo"
+            ]
+            if clean_p and clean_p.lower() not in default_prompts:
+                retrieved_text, src_citations = self.rag_engine.retrieve_context_for_query(clean_p, status_callback=on_status)
+                if retrieved_text:
+                    search_context = retrieved_text
+                    citations.extend(src_citations)
+
+            final_response = self.vision_service.analyze_image_stream(
+                image_input=image_input,
+                prompt=prompt,
+                token_callback=on_token,
+                status_callback=on_status,
+                stop_check=lambda: self.rag_engine._abort_generation,
+                search_context=search_context
+            )
+
+            # Finalize formatting and citations
+            citations = list(dict.fromkeys(citations))
+            self._safe_ui(lambda: self.chat_view.finalize_last_ai_message(final_response, citations))
+            self._safe_ui(self._auto_save_current_session)
+            self._safe_ui(lambda: self.status_pill.set_status("🟢 Ready", "success"))
+
+            # Auto TTS if enabled
+            if self.auto_speak_enabled and final_response:
+                self.voice_service.speak(final_response)
+
+        except Exception as e:
+            self._safe_ui(lambda err=e: self.chat_view.add_system_notice(f"❌ Vision Analysis Error: {err}"))
+            self._safe_ui(self._auto_save_current_session)
+        finally:
+            self._set_progress(stop=True)
+            self._set_generating_state(False)
+
+    def trigger_image_upload(self):
+        """Allows user to upload a photo (JPEG/PNG/WEBP) for Pixtral image analysis."""
+        file_path = filedialog.askopenfilename(
+            title="Select Photo for AI Vision Analysis",
+            filetypes=[
+                ("Image Files", "*.png *.jpg *.jpeg *.webp *.bmp"),
+                ("PNG Images", "*.png"),
+                ("JPEG Images", "*.jpg *.jpeg"),
+                ("All Files", "*.*")
+            ]
+        )
+        if not file_path:
+            return
+
+        try:
+            img = Image.open(file_path)
+            self.attached_image_path = file_path
+            self.attached_image = img
+
+            fname = Path(file_path).name
+            sz_kb = round(os.path.getsize(file_path) / 1024, 1)
+
+            self.img_preview_label.configure(text=f"{fname} ({sz_kb} KB)")
+            self.image_preview_bar.pack(fill="x", pady=(0, 6), before=self.input_card)
+            self.query_entry.configure(placeholder_text="Ask a question about this image (or click Search to analyze)...")
+            try:
+                self.query_entry.textbox.focus_set()
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("Image Load Error", f"Failed to open image file:\n{e}")
+
+    def clear_attached_image(self):
+        """Clears the currently attached photo."""
+        self.attached_image_path = None
+        self.attached_image = None
+        try:
+            self.image_preview_bar.pack_forget()
+        except Exception:
+            pass
+        placeholder = "Ask question or search web..." if self.is_mobile else "Ask any question about your documents, code, or search the web..."
+        self.query_entry.configure(placeholder_text=placeholder)
 
     # ==========================================
     # QUICK AI TOOLS (Summary, Quiz, Insights)
@@ -594,8 +795,51 @@ class AISearchStudioApp(ctk.CTk):
         self.send_user_query()
 
     # ==========================================
-    # FILE UPLOADS & INDEXING
+    # FILE & PHOTO ATTACHMENTS (Gemini / ChatGPT Style)
     # ==========================================
+    def show_attachment_menu(self):
+        """Displays / toggles Gemini/ChatGPT-style attachment popup menu on clicking '+'."""
+        if hasattr(self, "attachment_popup"):
+            self.attachment_popup.toggle(self.attach_btn)
+
+    def _on_attachment_menu_state_change(self, is_open: bool):
+        """Switches the attachment button symbol between '+' and '✕' smoothly."""
+        try:
+            if is_open:
+                self.attach_btn.configure(
+                    text="✕",
+                    font=("Segoe UI", 13, "bold"),
+                    text_color=self.colors.get("text_primary", "#f1f5f9")
+                )
+            else:
+                self.attach_btn.configure(
+                    text="+",
+                    font=("Segoe UI", 18, "bold"),
+                    text_color=self.colors.get("text_secondary", "#94a3b8")
+                )
+        except Exception:
+            pass
+
+    def _on_global_click(self, event):
+        """Dismisses attachment popup when clicking anywhere outside."""
+        try:
+            if hasattr(self, "attachment_popup") and self.attachment_popup.is_visible():
+                widget = event.widget
+                is_on_btn = (widget == self.attach_btn or str(widget).startswith(str(self.attach_btn)))
+                is_on_popup = (widget == self.attachment_popup or str(widget).startswith(str(self.attachment_popup)))
+                if not is_on_btn and not is_on_popup:
+                    self.attachment_popup.hide()
+        except Exception:
+            pass
+
+    def _quick_image_search_prompt(self):
+        self.query_entry.delete(0, "end")
+        self.query_entry.insert(0, "Show me a picture of ")
+        try:
+            self.query_entry.textbox.focus_set()
+        except Exception:
+            pass
+
     def trigger_file_upload(self):
         file_paths = filedialog.askopenfilenames(
             title="Select Documents, Code, Data, or Images",
@@ -660,7 +904,10 @@ class AISearchStudioApp(ctk.CTk):
     # ==========================================
     def toggle_voice_stt(self):
         if not self.voice_service.is_listening:
-            self.mic_btn.configure(text="🔴", fg_color=self.colors["accent_danger"])
+            self.voice_service.stop_speaking()
+            self.chat_view.reset_all_tts_buttons()
+            rec_icon = get_mic_icon("#ffffff", size=(20, 20))
+            self.mic_btn.configure(image=rec_icon, text="", fg_color=self.colors["accent_danger"])
             self.query_entry.configure(placeholder_text="🎙️ Listening... Speak your question clearly.")
 
             def on_status(msg):
@@ -686,19 +933,43 @@ class AISearchStudioApp(ctk.CTk):
         self.send_user_query()
 
     def _reset_mic_ui(self):
-        self.mic_btn.configure(text="🎤", fg_color="transparent")
+        self.mic_icon = get_mic_icon(self.colors["text_secondary"], size=(20, 20))
+        self.mic_btn.configure(image=self.mic_icon, text="", fg_color="transparent")
         placeholder = "Ask question or search web..." if self.is_mobile else "Ask any question about your documents, code, or search the web..."
         self.query_entry.configure(placeholder_text=placeholder)
         self.status_pill.set_status("🟢 Ready", "success")
 
-    def speak_text(self, text: str):
-        """Triggers audio playback of message."""
-        if self.voice_service.is_speaking:
+    def speak_text(self, text: str, card: Optional[ChatMessageCard] = None):
+        """Triggers audio playback of message with dynamic Speak / Stop toggle."""
+        # Check if this specific card (or global TTS) is already speaking
+        is_this_card_speaking = getattr(card, "_is_speaking_card", False)
+
+        if is_this_card_speaking or (card is None and self.voice_service.is_speaking):
             self.voice_service.stop_speaking()
+            self.chat_view.reset_all_tts_buttons()
             self.status_pill.set_status("🟢 Ready", "success")
-        else:
-            self.status_pill.set_status("🔊 Speaking...", "success")
-            self.voice_service.speak(text, callback_done=lambda: self._safe_ui(lambda: self.status_pill.set_status("🟢 Ready", "success")))
+            return
+
+        # Stop any active voice narration and reset other cards
+        self.voice_service.stop_speaking()
+        self.chat_view.reset_all_tts_buttons()
+
+        if not text or not text.strip():
+            return
+
+        # Set active speaking state on card & status pill
+        if card:
+            card.set_speaking_state(True)
+        self.status_pill.set_status("🔊 Speaking...", "success")
+
+        def on_done():
+            def ui_reset():
+                if card:
+                    card.set_speaking_state(False)
+                self.status_pill.set_status("🟢 Ready", "success")
+            self._safe_ui(ui_reset)
+
+        self.voice_service.speak(text, callback_done=on_done)
 
     # ==========================================
     # CONTROLS & SETTINGS CALLBACKS
@@ -714,13 +985,14 @@ class AISearchStudioApp(ctk.CTk):
         try:
             self.mode_hud.trigger(mode, voice_callback=lambda _: self.voice_service.speak_mode(mode))
         except Exception as e:
-            print(f"HUD Trigger Notice: {e}")
-
-        self.chat_view.add_system_notice(f"🔄 Search engine mode switched to: **{mode}**")
+            pass
 
     def on_model_selected(self, model: str):
         self.rag_engine.set_model(model)
-        self.chat_view.add_system_notice(f"⚡ AI model switched to: **{model}**")
+        try:
+            self.sidebar.model_menu.set(model)
+        except Exception:
+            pass
 
     def on_temp_changed(self, temp: float):
         self.rag_engine.set_temperature(temp)
@@ -730,17 +1002,18 @@ class AISearchStudioApp(ctk.CTk):
 
     def on_tts_toggled(self, enabled: bool):
         self.auto_speak_enabled = enabled
-        notice = "🔊 Auto-Read (TTS) Enabled" if enabled else "🔇 Auto-Read (TTS) Disabled"
-        self.chat_view.add_system_notice(notice)
 
     def on_theme_selected(self, theme_name: str):
-        # 1. Update appearance mode (Light vs Dark)
+        # 1. Update active theme in core config
+        set_current_theme(theme_name)
+
+        # 2. Update appearance mode (Light vs Dark)
         ctk.set_appearance_mode("light" if "Light" in theme_name else "dark")
 
-        # 2. Get new palette
+        # 3. Get new palette
         self.colors = get_theme_colors(theme_name)
 
-        # 3. Re-color root & layout containers
+        # 4. Re-color root & layout containers
         self.configure(fg_color=self.colors["bg_base"])
         self.header_bar.configure(
             fg_color=self.colors["bg_sidebar"],
@@ -751,30 +1024,54 @@ class AISearchStudioApp(ctk.CTk):
             hover_color=self.colors["chip_hover"],
             text_color=self.colors["text_primary"]
         )
+        self.history_btn.configure(
+            fg_color=self.colors["chip_bg"],
+            hover_color=self.colors["chip_hover"],
+            text_color=self.colors["text_primary"]
+        )
         self.clear_btn.configure(
             hover_color=self.colors["chip_hover"],
             text_color=self.colors["text_muted"]
         )
 
-        # 4. Re-color status pill, sidebar, and chat view
+        # 5. Re-color status pill, sidebar, and chat view
         self.status_pill.apply_theme(self.colors)
         self.sidebar.apply_theme(self.colors, self.rag_engine.active_sources_meta)
         self.chat_view.apply_theme(self.colors)
 
-        # 5. Re-color bottom input card & prompt chips
+        # 6. Re-color bottom input card & prompt chips
         self.progress_bar.configure(progress_color=self.colors["accent_primary"])
         self.input_card.configure(
             fg_color=self.colors["bg_input"],
             border_color=self.colors["border_color"]
         )
-        self.attach_btn.configure(
-            hover_color=self.colors["chip_hover"],
-            text_color=self.colors["text_secondary"]
-        )
+        if hasattr(self, "attachment_popup"):
+            self.attachment_popup.apply_theme(self.colors)
+            is_open = self.attachment_popup.is_visible()
+            self.attach_btn.configure(
+                hover_color=self.colors["chip_hover"],
+                text_color=self.colors["text_primary"] if is_open else self.colors["text_secondary"]
+            )
+        else:
+            self.attach_btn.configure(
+                hover_color=self.colors["chip_hover"],
+                text_color=self.colors["text_secondary"]
+            )
+        if hasattr(self, "image_preview_bar"):
+            self.image_preview_bar.configure(
+                fg_color=self.colors["chip_bg"],
+                border_color=self.colors["accent_primary"]
+            )
+            self.img_preview_label.configure(text_color=self.colors["text_primary"])
+            self.img_remove_btn.configure(
+                hover_color=self.colors["chip_hover"],
+                text_color=self.colors["accent_danger"]
+            )
         self.query_entry.apply_theme(self.colors)
+        self.mic_icon = get_mic_icon(self.colors["text_secondary"], size=(20, 20))
         self.mic_btn.configure(
-            hover_color=self.colors["chip_hover"],
-            text_color=self.colors["text_secondary"]
+            image=self.mic_icon,
+            hover_color=self.colors["chip_hover"]
         )
         if not self.is_processing:
             self.send_btn.configure(
@@ -793,7 +1090,75 @@ class AISearchStudioApp(ctk.CTk):
             if hasattr(chip, "apply_theme"):
                 chip.apply_theme(self.colors)
 
-        self.chat_view.add_system_notice(f"🎨 Theme instantly switched to: **{theme_name}**")
+        if hasattr(self, "attachment_popup"):
+            self.attachment_popup.apply_theme(self.colors)
+
+    def _ensure_current_session(self) -> str:
+        """Returns active session ID or creates a new one."""
+        if not self.current_session_id:
+            new_sess = self.session_manager.create_session()
+            self.current_session_id = new_sess["id"]
+        return self.current_session_id
+
+    def _auto_save_current_session(self):
+        """Auto-saves the live chat feed to the active session file."""
+        try:
+            sess_id = self._ensure_current_session()
+            history = self.chat_view.get_conversation_history()
+            if history:
+                self.session_manager.save_session(sess_id, history)
+        except Exception as e:
+            print(f"Auto-save warning: {e}")
+
+    def trigger_history_modal(self):
+        """Opens the interactive Chat History & Session Activation modal."""
+        if self.current_session_id:
+            self._auto_save_current_session()
+
+        ChatHistoryModal(
+            self,
+            session_manager=self.session_manager,
+            current_session_id=self.current_session_id,
+            on_activate_session=self.activate_session,
+            on_new_chat=self.start_new_chat
+        )
+
+    def activate_session(self, session_id: str):
+        """Restores a selected past session into the live screen and syncs conversational memory."""
+        self.voice_service.stop_speaking()
+
+        sess_data = self.session_manager.get_session(session_id)
+        if not sess_data:
+            messagebox.showerror("Error", f"Could not find chat session with ID: {session_id}")
+            return
+
+        messages = sess_data.get("messages", [])
+        self.chat_view.load_messages(messages)
+        self.current_session_id = session_id
+
+        # Sync RAG Engine's conversational history memory so AI retains context
+        from langchain_core.messages import HumanMessage, AIMessage
+        self.rag_engine.chat_history = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "user" and content:
+                self.rag_engine.chat_history.append(HumanMessage(content=content))
+            elif role == "ai" and content:
+                self.rag_engine.chat_history.append(AIMessage(content=content))
+
+        sess_title = sess_data.get("title", "Past Session")
+        self.status_pill.set_status(f"🟢 Activated: {sess_title[:16]}..", "success")
+
+    def start_new_chat(self):
+        """Starts a clean, new chat conversation."""
+        self.voice_service.stop_speaking()
+        if self.current_session_id:
+            self._auto_save_current_session()
+        self.chat_view.clear_chat()
+        self.rag_engine.chat_history = []
+        self.current_session_id = None
+        self.status_pill.set_status("🟢 Ready", "success")
 
     def show_knowledge_stats(self):
         stats = self.rag_engine.get_knowledge_stats()
@@ -807,9 +1172,8 @@ class AISearchStudioApp(ctk.CTk):
         ExportChatModal(self, history)
 
     def trigger_clear_chat(self):
-        if messagebox.askyesno("Clear Chat", "Are you sure you want to clear the conversation history?"):
-            self.voice_service.stop_speaking()
-            self.chat_view.clear_chat()
+        if messagebox.askyesno("Clear Chat", "Are you sure you want to clear the conversation and start a new chat?"):
+            self.start_new_chat()
 
     # ==========================================
     # THREAD-SAFE UI HELPERS

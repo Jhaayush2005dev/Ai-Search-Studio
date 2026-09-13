@@ -1,0 +1,36 @@
+{
+  "id": "session_20260913_115006_e39568",
+  "title": "what is oops in java",
+  "created_at": "2026-09-13T11:50:06.043978",
+  "updated_at": "2026-09-13T11:52:33.993104",
+  "messages": [
+    {
+      "role": "user",
+      "content": "what is oops in java",
+      "timestamp": "11:50 AM"
+    },
+    {
+      "role": "ai",
+      "content": "**OOP (Object-Oriented Programming) in Java** is a programming paradigm that organizes code into **objects** (instances of classes) rather than just functions and data. It follows **four core principles**:\n\n### **1. Class & Object**\n- **Class**: A blueprint for creating objects (e.g., `Car`, `Student`).\n- **Object**: An instance of a class (e.g., `myCar = new Car()`).\n\n### **2. Encapsulation**\n- Bundles data (variables) and methods (functions) into a single unit (class).\n- Restricts direct access to some components using **access modifiers** (`private`, `public`).\n\n### **3. Inheritance**\n- Allows a **child class** to inherit properties/methods from a **parent class**.\n- Example:\n  ```java\n  class Animal { void eat() {} }\n  class Dog extends Animal { } // Dog inherits from Animal\n  ```\n\n### **4. Polymorphism**\n- One entity (method/class) behaves differently in different contexts.\n  - **Compile-time (Method Overloading)**: Same method name, different parameters.\n  - **Runtime (Method Overriding)**: Child class redefines a parent’s method.\n\n### **5. Abstraction**\n- Hides complex implementation details, exposing only essential features.\n  - Achieved via **abstract classes** or **interfaces**.\n\n---\n**Why Use OOP in Java?**\n- **Modularity**: Code is organized logically.\n- **Reusability**: Inheritance reduces redundancy.\n- **Scalability**: Easier to maintain and extend.\n\n---\n**Example (Class + Object):**\n```java\nclass Car { // Class\n    String model = \"Tesla\"; // Attribute\n    void drive() { System.out.println(\"Driving!\"); } // Method\n}\n\npublic class Main {\n    public static void main(String[] args) {\n        Car myCar = new Car(); // Object\n        myCar.drive(); // Output: \"Driving!\"\n    }\n}\n```\n\n---\n**Key Java OOP Features:**\n- **Constructors**: Initialize objects.\n- **Interfaces**: Define contracts (methods without implementation).\n- **Packages**: Group related classes (e.g., `java.util`).\n\nFor deeper learning, explore [Java Official OOP Tutorial](https://docs.oracle.com/javase/tutorial/java/concepts/).",
+      "timestamp": "11:50 AM",
+      "citations": [
+        "z.pdf",
+        "B.java"
+      ]
+    },
+    {
+      "role": "user",
+      "content": "tell me the answer",
+      "timestamp": "11:52 AM"
+    },
+    {
+      "role": "ai",
+      "content": "The time complexity of Quicksort in the **best case** is **O(n log n)**.\n\n### Explanation:\n- **Best Case for Quicksort** occurs when the pivot always divides the array into two nearly equal halves at every recursive step.\n- This leads to a balanced recursion tree with a depth of **log₂ n**, and at each level, **O(n)** work is done (due to partitioning).\n- Hence, the total time complexity is **O(n log n)**.",
+      "timestamp": "11:52 AM",
+      "citations": [
+        "Mistral Pixtral Vision (pixtral-12b-2409)",
+        "notes.txt"
+      ]
+    }
+  ]
+}

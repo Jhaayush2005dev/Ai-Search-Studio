@@ -8,8 +8,10 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT_DIR / "documents loaders"
 CHROMA_DIR = ROOT_DIR / "chroma_db"
+SESSIONS_DIR = ROOT_DIR / "chat_sessions"
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Load Environment
 load_dotenv(ROOT_DIR / ".env", override=True)
@@ -144,6 +146,12 @@ THEMES = {
 }
 
 CURRENT_THEME = "Developer Dark"
+
+def set_current_theme(theme_name):
+    global CURRENT_THEME
+    if theme_name in THEMES:
+        CURRENT_THEME = theme_name
+    return get_theme_colors(CURRENT_THEME)
 
 def get_theme_colors(theme_name=None):
     if not theme_name or theme_name not in THEMES:

@@ -1,12 +1,87 @@
 import time
 import re
+import os
+import webbrowser
 import tkinter as tk
 import customtkinter as ctk
 from datetime import datetime
 from typing import Optional, Callable, List
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from core.config import get_theme_colors
+from core.config import get_theme_colors, DOCS_DIR
+
+_MIC_ICON_CACHE = {}
+
+def get_mic_icon(color: str = "#94a3b8", size: tuple = (20, 20)) -> ctk.CTkImage:
+    """
+    Renders and returns a crisp, anti-aliased modern studio/voice search microphone CTkImage
+    matching Google/Material voice search design (vertical capsule, U-cradle, stem).
+    """
+    cache_key = (color, size)
+    if cache_key in _MIC_ICON_CACHE:
+        return _MIC_ICON_CACHE[cache_key]
+
+    scale = 8
+    tw, th = size
+    w, h = tw * scale, th * scale
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    cx = tw / 2.0 * scale
+    stroke = max(2.0 * scale * (tw / 24.0), 1.8 * scale)
+
+    # 1. Hollow Capsule
+    cap_w = 7.5 * scale * (tw / 24.0)
+    cap_top = 2.0 * scale * (th / 24.0)
+    cap_bot = 12.5 * scale * (th / 24.0)
+    cap_left = cx - cap_w / 2.0
+    cap_right = cx + cap_w / 2.0
+    cap_r = cap_w / 2.0
+
+    draw.rounded_rectangle(
+        [cap_left, cap_top, cap_right, cap_bot],
+        radius=cap_r,
+        outline=color,
+        width=int(round(stroke))
+    )
+
+    # 2. U-Cradle Arc
+    crad_w = 15.0 * scale * (tw / 24.0)
+    crad_top = 7.0 * scale * (th / 24.0)
+    crad_bot = 16.5 * scale * (th / 24.0)
+    crad_left = cx - crad_w / 2.0
+    crad_right = cx + crad_w / 2.0
+
+    arc_box = [crad_left, 2 * crad_top - crad_bot, crad_right, crad_bot]
+    draw.arc(arc_box, start=0, end=180, fill=color, width=int(round(stroke)))
+
+    # Rounded end caps for cradle
+    r_cap = stroke / 2.0
+    draw.ellipse([crad_right - stroke, crad_top - r_cap, crad_right, crad_top + r_cap], fill=color)
+    draw.ellipse([crad_left, crad_top - r_cap, crad_left + stroke, crad_top + r_cap], fill=color)
+
+    # 3. Stem
+    stem_top = crad_bot
+    stem_bot = 21.0 * scale * (th / 24.0)
+    draw.line([cx, stem_top, cx, stem_bot], fill=color, width=int(round(stroke)))
+    draw.ellipse([cx - r_cap, stem_bot - r_cap, cx + r_cap, stem_bot + r_cap], fill=color)
+
+    pil_img = img.resize(size, Image.Resampling.LANCZOS)
+    ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+    _MIC_ICON_CACHE[cache_key] = ctk_img
+    return ctk_img
+
+def is_dark_palette(colors: dict) -> bool:
+    """Accurately determines if the current color palette is dark mode using luminance."""
+    bg = colors.get("bg_base", "#131316")
+    try:
+        hex_clean = bg.lstrip("#")
+        if len(hex_clean) == 6:
+            r, g, b = (int(hex_clean[i:i+2], 16) for i in (0, 2, 4))
+            return (0.299 * r + 0.587 * g + 0.114 * b) < 128
+    except Exception:
+        pass
+    return "light" not in str(bg).lower()
 
 class StatusPill(ctk.CTkFrame):
     """Clean developer pill badge showing engine status with subtle indicator dot."""
@@ -302,12 +377,13 @@ class CodeBlockCard(ctk.CTkFrame):
         self.copy_btn.pack(side="right")
 
         # Code display
+        is_dark = is_dark_palette(colors)
         self.textbox = ctk.CTkTextbox(
             self,
             font=("Consolas", 11),
             wrap="none",
             fg_color="transparent",
-            text_color="#93c5fd" if "Dark" in str(colors.get("bg_base")) or "#1" in str(colors.get("bg_base")) else "#1e40af",
+            text_color="#93c5fd" if is_dark else "#1e40af",
             activate_scrollbars=True
         )
         self.textbox.pack(fill="both", expand=True, padx=8, pady=(0, 6))
@@ -316,27 +392,6 @@ class CodeBlockCard(ctk.CTkFrame):
 
         lines = min(max(len(code_text.splitlines()), 3), 15)
         self.textbox.configure(height=lines * 20)
-
-        # Mousewheel scroll propagation to parent chat view
-        self._bind_wheel_propagation()
-
-    def _bind_wheel_propagation(self):
-        def _propagate_wheel(e):
-            w = self.master
-            while w:
-                if hasattr(w, "_scroll_canvas"):
-                    w._scroll_canvas(e)
-                    return "break"
-                w = getattr(w, "master", None)
-            return None
-
-        for target in [self, self.header, self.lang_label, self.copy_btn, self.textbox, getattr(self.textbox, "_textbox", None)]:
-            if target and hasattr(target, "bind"):
-                for evt in ["<MouseWheel>", "<Button-4>", "<Button-5>"]:
-                    try:
-                        target.bind(evt, _propagate_wheel, add=True)
-                    except Exception:
-                        pass
 
     def _copy_code(self):
         self.clipboard_clear()
@@ -348,7 +403,7 @@ class CodeBlockCard(ctk.CTkFrame):
         self.configure(fg_color=colors["bg_code"], border_color=colors["border_color"])
         self.lang_label.configure(text_color=colors["text_muted"])
         self.copy_btn.configure(hover_color=colors["chip_hover"], text_color=colors["text_secondary"])
-        is_dark = "Dark" in str(colors.get("bg_base")) or "#1" in str(colors.get("bg_base"))
+        is_dark = is_dark_palette(colors)
         txt_col = "#93c5fd" if is_dark else "#1e40af"
         self.textbox.configure(text_color=txt_col)
 
@@ -389,6 +444,9 @@ class SelectableMessageText(tk.Text):
         self._bg_color = bg_color
         self._fg_color = fg_color
         self._current_height = calc_h
+        self._link_urls = {} # tag_name -> target url
+        self._link_counter = 0
+
         self._configure_tags()
         self._setup_context_menu()
         self._setup_keybindings()
@@ -401,29 +459,47 @@ class SelectableMessageText(tk.Text):
         accent = colors.get("accent_primary", "#3b82f6")
         text_muted = colors.get("text_muted", "#94a3b8")
         chip_bg = colors.get("chip_bg", "#272f3d")
-        is_dark = "Dark" in str(colors.get("bg_base")) or "#1" in str(colors.get("bg_base"))
+        is_dark = is_dark_palette(colors)
         code_fg = "#93c5fd" if is_dark else "#1e40af"
 
-        self.tag_configure("h1", font=("Segoe UI", 15, "bold"), foreground=accent, spacing1=8, spacing3=4)
-        self.tag_configure("h2", font=("Segoe UI", 13, "bold"), foreground=accent, spacing1=6, spacing3=3)
-        self.tag_configure("h3", font=("Segoe UI", 12, "bold"), foreground=colors.get("text_primary", "#ffffff"), spacing1=4, spacing3=2)
+        # Balanced heading margins and readable line height
+        self.tag_configure("h1", font=("Segoe UI", 15, "bold"), foreground=accent, spacing1=6, spacing3=2)
+        self.tag_configure("h2", font=("Segoe UI", 13, "bold"), foreground=accent, spacing1=4, spacing3=2)
+        self.tag_configure("h3", font=("Segoe UI", 12, "bold"), foreground=colors.get("text_primary", "#ffffff"), spacing1=3, spacing3=1)
         self.tag_configure("bold", font=("Segoe UI", 12, "bold"))
         self.tag_configure("italic", font=("Segoe UI", 12, "italic"), foreground=text_muted)
         self.tag_configure("code_inline", font=("Consolas", 11), background=chip_bg, foreground=code_fg)
-        self.tag_configure("bullet", lmargin1=8, lmargin2=22)
+        self.tag_configure("bullet", lmargin1=6, lmargin2=20)
         self.tag_configure("link", foreground=accent, underline=True)
+        self.configure(spacing2=2)
 
     def _setup_context_menu(self):
         self.menu = tk.Menu(self, tearoff=0, bg="#1e222b", fg="#f1f5f9", activebackground="#3b82f6", activeforeground="#ffffff", font=("Segoe UI", 10))
-        self.menu.add_command(label="📋 Copy Selection (Ctrl+C)", command=self.copy_selection)
-        self.menu.add_command(label="📄 Copy Entire Text", command=self.copy_all)
-        self.menu.add_separator()
-        self.menu.add_command(label="✨ Select All (Ctrl+A)", command=self.select_all)
 
         def _popup(e):
             try:
+                self.menu.delete(0, "end")
+
+                # Detect if right-click was on an active hyperlink
+                clicked_idx = self.index(f"@{e.x},{e.y}")
+                tags = self.tag_names(clicked_idx)
+                link_url = None
+                for t in tags:
+                    if t in self._link_urls:
+                        link_url = self._link_urls[t]
+                        break
+
+                if link_url:
+                    self.menu.add_command(label="🌐 Open Link in Browser", command=lambda u=link_url: webbrowser.open(u))
+                    self.menu.add_command(label="🔗 Copy Link Address", command=lambda u=link_url: self._copy_text(u))
+                    self.menu.add_separator()
+
                 has_sel = bool(self.tag_ranges("sel"))
-                self.menu.entryconfigure(0, state="normal" if has_sel else "disabled")
+                self.menu.add_command(label="📋 Copy Selection (Ctrl+C)", command=self.copy_selection, state="normal" if has_sel else "disabled")
+                self.menu.add_command(label="📄 Copy Entire Text", command=self.copy_all)
+                self.menu.add_separator()
+                self.menu.add_command(label="✨ Select All (Ctrl+A)", command=self.select_all)
+
                 self.menu.tk_popup(e.x_root, e.y_root)
             finally:
                 self.menu.grab_release()
@@ -436,39 +512,94 @@ class SelectableMessageText(tk.Text):
         self.bind("<Control-a>", lambda e: (self.select_all(), "break"))
         self.bind("<Control-A>", lambda e: (self.select_all(), "break"))
 
+    def _copy_text(self, text: str):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except Exception:
+            pass
+
     def copy_selection(self):
         try:
             sel = self.get("sel.first", "sel.last")
             if sel:
-                self.clipboard_clear()
-                self.clipboard_append(sel)
+                self._copy_text(sel)
         except Exception:
             pass
 
     def copy_all(self):
         content = self.get("1.0", "end-1c")
         if content:
-            self.clipboard_clear()
-            self.clipboard_append(content)
+            self._copy_text(content)
 
     def select_all(self):
         self.tag_add("sel", "1.0", "end-1c")
 
     def append_text(self, text: str):
-        self.configure(state="normal")
-        self.insert("end", text)
-        self.configure(state="disabled")
-        self.auto_fit_height(fast=True)
+        try:
+            self.configure(state="normal")
+            self.insert("end", text)
+            self.configure(state="disabled")
+            # Quick height update during token streaming
+            line_count = int(self.index("end-1c").split(".")[0])
+            if getattr(self, "_current_height", None) != line_count:
+                self._current_height = line_count
+                self.configure(height=max(line_count, 1))
+        except Exception:
+            pass
 
     def set_markdown_text(self, markdown_text: str):
-        self.configure(state="normal")
-        self.delete("1.0", "end")
-        self._parse_and_insert_markdown(markdown_text)
-        self.configure(state="disabled")
-        self.auto_fit_height(fast=False)
+        try:
+            self.configure(state="normal")
+            self.delete("1.0", "end")
+            self._link_urls = {}
+            self._link_counter = 0
+            self._parse_and_insert_markdown(markdown_text)
+            self.configure(state="disabled")
+
+            # Recalculate width for user cards
+            if self.role == "user":
+                raw_lines = markdown_text.split("\n") if markdown_text else [""]
+                max_l = max(len(l) for l in raw_lines) if raw_lines else 14
+                target_w = min(max(max_l + 3, 14), 65)
+                self.configure(width=target_w)
+
+            self.auto_fit_height(fast=False)
+        except Exception:
+            pass
+
+    def _insert_link(self, label: str, url: str):
+        """Inserts an interactive clickable hyperlink with hand cursor and browser launch."""
+        clean_url = url.strip()
+        if not clean_url.startswith(("http://", "https://", "ftp://", "mailto:", "file://")):
+            clean_url = "https://" + clean_url
+
+        self._link_counter += 1
+        tag_name = f"link_tag_{self._link_counter}"
+        self._link_urls[tag_name] = clean_url
+
+        colors = self.colors or get_theme_colors()
+        accent = colors.get("accent_primary", "#3b82f6")
+
+        self.tag_configure(tag_name, foreground=accent, underline=True)
+        self.tag_bind(tag_name, "<Enter>", lambda e: self.configure(cursor="hand2"))
+        self.tag_bind(tag_name, "<Leave>", lambda e: self.configure(cursor="xterm"))
+
+        def _open_url_event(event, u=clean_url):
+            try:
+                webbrowser.open(u)
+            except Exception as ex:
+                print(f"Failed opening URL {u}: {ex}")
+            return "break"
+
+        self.tag_bind(tag_name, "<Button-1>", _open_url_event)
+        self.insert("end", label, (tag_name, "link"))
 
     def _parse_and_insert_markdown(self, text: str):
-        lines = text.split("\n")
+        clean_text = text.strip().replace("\r\n", "\n")
+        # Collapse 3+ consecutive newlines down to 2
+        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
+        lines = clean_text.split("\n")
         for idx, line in enumerate(lines):
             stripped = line.strip()
             # Headers
@@ -495,7 +626,7 @@ class SelectableMessageText(tk.Text):
                 self.insert("end", "\n")
 
     def _insert_inline_formatted(self, line: str):
-        pattern = r"(\*\*[^*]+?\*\*|\*[^*]+?\*|`[^`]+?`|\[[^\]]+?\]\([^)]+?\))"
+        pattern = r"(\*\*[^*]+?\*\*|\*[^*]+?\*|`[^`]+?`|\[[^\]]+?\]\([^)]+?\)|https?://[^\s<>,;:\"'()\[\]]+|www\.[^\s<>,;:\"'()\[\]]+|\b[a-zA-Z0-9_\-]+\.(?:com|org|net|io|edu|gov|app|dev|ai|me)(?:/[^\s<>,;:\"'()\[\]]*)?)"
         parts = re.split(pattern, line)
         for part in parts:
             if not part:
@@ -510,21 +641,45 @@ class SelectableMessageText(tk.Text):
                 m = re.match(r"\[([^\]]+)\]\(([^)]+)\)", part)
                 if m:
                     label, url = m.groups()
-                    self.insert("end", label, "link")
+                    self._insert_link(label, url)
                 else:
                     self.insert("end", part)
+            elif part.startswith(("http://", "https://", "www.")) or re.match(r"^[a-zA-Z0-9_\-]+\.(?:com|org|net|io|edu|gov|app|dev|ai|me)", part):
+                self._insert_link(part, part)
             else:
                 self.insert("end", part)
 
     def auto_fit_height(self, fast: bool = False):
+        """Dynamically calculates exact line height so all content fits perfectly with zero extra space."""
         try:
-            if fast or not self.winfo_ismapped():
-                line_count = int(self.index("end-1c").split(".")[0])
+            if not self.winfo_exists():
+                return
+            if not fast and self.winfo_ismapped() and self.winfo_width() > 30:
+                dlines = self.count("1.0", "end-1c", "displaylines")
+                if dlines and dlines[0] > 0:
+                    target_h = max(dlines[0], 1)
+                else:
+                    idx_lines = int(self.index("end-1c").split(".")[0])
+                    target_h = max(idx_lines, 1)
             else:
-                dlines = self.count("1.0", "end", "displaylines")
-                line_count = dlines[0] if (dlines and dlines[0] > 0) else int(self.index("end-1c").split(".")[0])
+                content = self.get("1.0", "end-1c")
+                raw_lines = content.split("\n") if content else [""]
+                if self.role == "user":
+                    max_l = max(len(l) for l in raw_lines) if raw_lines else 14
+                    w = min(max(max_l + 3, 14), 65)
+                else:
+                    w = 75
 
-            target_h = max(line_count, 1)
+                est_lines = 0
+                char_per_line = max(w - 2, 20)
+                for l in raw_lines:
+                    if not l:
+                        est_lines += 1
+                    else:
+                        import math
+                        est_lines += max(1, math.ceil(len(l) / char_per_line))
+                target_h = max(est_lines, 1)
+
             if getattr(self, "_current_height", None) != target_h:
                 self._current_height = target_h
                 self.configure(height=target_h)
@@ -535,18 +690,22 @@ class SelectableMessageText(tk.Text):
         self.colors = colors
         self._bg_color = bg_color
         self._fg_color = colors.get("text_primary", "#f1f5f9")
+        accent = colors.get("accent_primary", "#3b82f6")
         self.configure(
             bg=bg_color,
             fg=self._fg_color,
-            selectbackground=colors.get("accent_primary", "#3b82f6"),
+            selectbackground=accent,
             insertbackground=self._fg_color
         )
         self.menu.configure(
             bg=colors.get("bg_sidebar", "#1e222b"),
             fg=self._fg_color,
-            activebackground=colors.get("accent_primary", "#3b82f6")
+            activebackground=accent
         )
         self._configure_tags()
+        # Re-color active link tags
+        for tag_name in self._link_urls.keys():
+            self.tag_configure(tag_name, foreground=accent, underline=True)
 
 
 class ChatMessageCard(ctk.CTkFrame):
@@ -571,6 +730,7 @@ class ChatMessageCard(ctk.CTkFrame):
         self._child_code_cards: List[CodeBlockCard] = []
         self._child_text_widgets: List[SelectableMessageText] = []
         self._child_text_labels = self._child_text_widgets # Compatibility alias
+        self._is_speaking_card = False
 
         if role == "user":
             bg_color = self.colors["bg_card_user"]
@@ -668,7 +828,7 @@ class ChatMessageCard(ctk.CTkFrame):
         self.content_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.content_frame.pack(fill="both", expand=True, padx=pad_x, pady=pad_bot_y)
 
-        # Selectable Text Widget (Supports direct click-drag selection, Ctrl+C, Context Menu)
+        # Selectable Text Widget (Supports direct click-drag selection, Ctrl+C, Context Menu, Active Links)
         self.text_widget = SelectableMessageText(
             self.content_frame,
             initial_text=initial_text,
@@ -676,7 +836,7 @@ class ChatMessageCard(ctk.CTkFrame):
             bg_color=bg_color,
             fg_color=self.colors["text_primary"]
         )
-        self.text_widget.pack(fill="both", expand=True, anchor="w")
+        self.text_widget.pack(fill="x", expand=True, anchor="w")
         self._child_text_widgets.append(self.text_widget)
         self.text_label = self.text_widget # Backwards compatibility
 
@@ -686,49 +846,13 @@ class ChatMessageCard(ctk.CTkFrame):
         self.sources_frame.pack_forget()
 
         self.bind("<Configure>", self._on_resize)
-        self._bind_wheel_propagation()
-
-    def _bind_wheel_propagation(self):
-        """Propagates mouse wheel events from the card and all child labels/code to the ChatView canvas."""
-        def _propagate_wheel(e):
-            w = self.master
-            while w:
-                if hasattr(w, "_scroll_canvas"):
-                    w._scroll_canvas(e)
-                    return "break"
-                w = getattr(w, "master", None)
-            return None
-
-        def _bind_sub(w):
-            if not w:
-                return
-            for evt in ["<MouseWheel>", "<Button-4>", "<Button-5>"]:
-                try:
-                    w.bind(evt, _propagate_wheel, add=True)
-                except Exception:
-                    pass
-                for attr in ["_textbox", "_label", "_canvas", "_parent_frame", "_frame"]:
-                    if hasattr(w, attr):
-                        sub = getattr(w, attr)
-                        if sub and hasattr(sub, "bind"):
-                            try:
-                                sub.bind(evt, _propagate_wheel, add=True)
-                            except Exception:
-                                pass
-            try:
-                for child in w.winfo_children():
-                    _bind_sub(child)
-            except Exception:
-                pass
-
-        _bind_sub(self)
 
     def _on_resize(self, event):
         try:
             if not hasattr(self, "_last_width"):
                 self._last_width = event.width
                 return
-            if event.width == self._last_width or event.width < 20:
+            if abs(event.width - self._last_width) < 12:
                 return
             self._last_width = event.width
             for txt in self._child_text_widgets:
@@ -748,82 +872,86 @@ class ChatMessageCard(ctk.CTkFrame):
 
         if "```" in self.full_content and self.role == "ai":
             self._render_rich_content()
+        else:
+            self.text_widget.auto_fit_height(fast=False)
 
     def _render_rich_content(self):
-        self.text_widget.pack_forget()
-        for w in self.content_frame.winfo_children():
-            if w != self.text_widget:
-                try:
-                    w.destroy()
-                except Exception:
-                    pass
-        self._child_code_cards = []
-        self._child_text_widgets = []
-        self._child_text_labels = self._child_text_widgets
+        try:
+            if hasattr(self, "text_widget") and self.text_widget.winfo_exists():
+                self.text_widget.pack_forget()
+            for w in self.content_frame.winfo_children():
+                if w != getattr(self, "text_widget", None) and w != getattr(self, "sources_frame", None):
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+            self._child_code_cards = []
+            self._child_text_widgets = []
+            self._child_text_labels = self._child_text_widgets
 
-        pattern = r"```([a-zA-Z0-9_\-]*)\n([\s\S]*?)```"
-        parts = re.split(pattern, self.full_content)
+            pattern = r"```([a-zA-Z0-9_\-]*)\n([\s\S]*?)```"
+            parts = re.split(pattern, self.full_content)
 
-        bg_col = self.cget("fg_color")
+            bg_col = self.cget("fg_color")
 
-        i = 0
-        while i < len(parts):
-            text_part = parts[i].strip()
-            if text_part:
-                txt_widget = SelectableMessageText(
-                    self.content_frame,
-                    initial_text=text_part,
-                    bg_color=bg_col,
-                    fg_color=self.colors["text_primary"]
-                )
-                txt_widget.pack(fill="x", expand=True, anchor="w", pady=4)
-                self._child_text_widgets.append(txt_widget)
+            i = 0
+            while i < len(parts):
+                text_part = parts[i].strip()
+                if text_part:
+                    txt_widget = SelectableMessageText(
+                        self.content_frame,
+                        initial_text=text_part,
+                        bg_color=bg_col,
+                        fg_color=self.colors["text_primary"]
+                    )
+                    txt_widget.pack(fill="x", expand=True, pady=4, anchor="w")
+                    self._child_text_widgets.append(txt_widget)
 
-            if i + 2 < len(parts):
-                lang = parts[i+1].strip()
-                code_text = parts[i+2].strip()
-                if code_text:
-                    code_card = CodeBlockCard(self.content_frame, code_text=code_text, language=lang)
-                    code_card.pack(fill="x", expand=True, pady=6)
-                    self._child_code_cards.append(code_card)
-                i += 3
-            else:
-                i += 1
-
-        self._bind_wheel_propagation()
+                if i + 2 < len(parts):
+                    lang = parts[i+1].strip()
+                    code_text = parts[i+2].strip()
+                    if code_text:
+                        code_card = CodeBlockCard(self.content_frame, code_text=code_text, language=lang)
+                        code_card.pack(fill="x", expand=True, pady=6)
+                        self._child_code_cards.append(code_card)
+                    i += 3
+                else:
+                    i += 1
+        except Exception as e:
+            print(f"Error rendering rich content: {e}")
 
     def set_citations(self, citations: List[str]):
-        if not citations:
+        """Avoids displaying sources row on response cards per user preference."""
+        pass
+
+    def _open_citation(self, src: str):
+        """Opens citation web URL in browser or local document with default viewer."""
+        if not src:
             return
-        self.sources_frame.pack(fill="x", padx=14, pady=(0, 8))
-        for w in self.sources_frame.winfo_children():
-            w.destroy()
-
-        header = ctk.CTkLabel(
-            self.sources_frame,
-            text="📑 Sources:",
-            font=("Segoe UI", 9, "bold"),
-            text_color=self.colors["text_muted"]
-        )
-        header.pack(side="left", padx=(0, 6))
-
-        for src in citations[:3]:
-            short_src = src.split("\\")[-1].split("/")[-1]
-            if len(short_src) > 16:
-                short_src = short_src[:14] + ".."
-            badge = ctk.CTkLabel(
-                self.sources_frame,
-                text=f"📌 {short_src}",
-                font=("Segoe UI", 9),
-                text_color=self.colors["text_secondary"],
-                fg_color=self.colors["chip_bg"],
-                corner_radius=4,
-                padx=6,
-                pady=1
-            )
-            badge.pack(side="left", padx=3)
-
-        self._bind_wheel_propagation()
+        if src.startswith(("http://", "https://", "www.")):
+            url = src if src.startswith(("http://", "https://")) else "https://" + src
+            try:
+                webbrowser.open(url)
+            except Exception as e:
+                print(f"Error opening citation link {url}: {e}")
+        elif src == "DuckDuckGo Web Search" or "Web Search" in src:
+            try:
+                webbrowser.open("https://duckduckgo.com")
+            except Exception:
+                pass
+        else:
+            # Check local file in DOCS_DIR
+            local_path = DOCS_DIR / src
+            if local_path.exists():
+                try:
+                    os.startfile(str(local_path))
+                except Exception:
+                    pass
+            elif os.path.exists(src):
+                try:
+                    os.startfile(src)
+                except Exception:
+                    pass
 
     def attach_image(self, img: Image.Image, query: str):
         preview_img = img.copy()
@@ -847,7 +975,6 @@ class ChatMessageCard(ctk.CTkFrame):
             text_color=self.colors["text_muted"]
         )
         hint.pack(anchor="w")
-        self._bind_wheel_propagation()
 
     def _handle_copy(self):
         self.clipboard_clear()
@@ -858,7 +985,27 @@ class ChatMessageCard(ctk.CTkFrame):
 
     def _handle_tts(self):
         if self.on_tts_click:
-            self.on_tts_click(self.full_content)
+            try:
+                self.on_tts_click(self.full_content, self)
+            except TypeError:
+                self.on_tts_click(self.full_content)
+
+    def set_speaking_state(self, is_speaking: bool):
+        """Toggles the button between '🔊 Speak' and '⏹ Stop' with visual feedback."""
+        self._is_speaking_card = is_speaking
+        if hasattr(self, "tts_btn") and self.tts_btn.winfo_exists():
+            if is_speaking:
+                self.tts_btn.configure(
+                    text="⏹ Stop",
+                    text_color=self.colors.get("accent_danger", "#ef4444"),
+                    hover_color=self.colors.get("chip_hover", "#292934")
+                )
+            else:
+                self.tts_btn.configure(
+                    text="🔊 Speak",
+                    text_color=self.colors.get("text_muted", "#71717a"),
+                    hover_color=self.colors.get("chip_hover", "#292934")
+                )
 
     def apply_theme(self, colors):
         self.colors = colors
@@ -883,12 +1030,21 @@ class ChatMessageCard(ctk.CTkFrame):
             txt.apply_theme(colors, bg_color)
 
         if hasattr(self, "tts_btn"):
-            self.tts_btn.configure(hover_color=colors["chip_hover"], text_color=colors["text_muted"])
+            tts_color = colors.get("accent_danger", "#ef4444") if getattr(self, "_is_speaking_card", False) else colors["text_muted"]
+            self.tts_btn.configure(hover_color=colors["chip_hover"], text_color=tts_color)
         if hasattr(self, "copy_btn"):
             self.copy_btn.configure(hover_color=colors["chip_hover"], text_color=colors["text_muted"])
 
         for code_card in self._child_code_cards:
             code_card.apply_theme(colors)
+
+        # Update citations badges and headers in-place
+        if hasattr(self, "sources_frame") and self.sources_frame.winfo_exists():
+            for idx, child in enumerate(self.sources_frame.winfo_children()):
+                if isinstance(child, ctk.CTkLabel):
+                    child.configure(text_color=colors["text_muted"])
+                elif isinstance(child, ctk.CTkButton):
+                    child.configure(fg_color=colors["chip_bg"], hover_color=colors["chip_hover"], text_color=colors["text_secondary"])
 
 
 class SearchInputBox(ctk.CTkFrame):
@@ -1017,3 +1173,109 @@ class SearchInputBox(ctk.CTkFrame):
             self.textbox.configure(text_color=colors.get("text_muted", "#64748b"))
         else:
             self.textbox.configure(text_color=colors.get("text_primary", "#f1f5f9"))
+
+
+class AttachmentMenuPopup(ctk.CTkFrame):
+    """
+    Modern Gemini / ChatGPT-style floating attachment menu card with rounded corners,
+    icon options, and smooth hover highlights.
+    """
+    def __init__(self, master, on_upload_photo=None, on_upload_files=None, on_search_image=None, on_summarize=None, on_quiz=None, on_state_change=None, **kwargs):
+        self.colors = get_theme_colors()
+        super().__init__(
+            master,
+            width=230,
+            fg_color=self.colors["bg_sidebar"],
+            corner_radius=12,
+            border_width=1,
+            border_color=self.colors["border_color"],
+            **kwargs
+        )
+        self.on_upload_photo = on_upload_photo
+        self.on_upload_files = on_upload_files
+        self.on_search_image = on_search_image
+        self.on_summarize = on_summarize
+        self.on_quiz = on_quiz
+        self.on_state_change = on_state_change
+        self._item_buttons = []
+
+        self._build_items()
+
+    def _build_items(self):
+        items = [
+            ("📷  Photos (Image Analysis)", self.on_upload_photo),
+            ("📄  Upload Files & Docs", self.on_upload_files),
+            ("🎨  Search Web Images", self.on_search_image),
+            ("📝  Summarize Knowledge", self.on_summarize),
+            ("🎯  Practice Quiz", self.on_quiz),
+        ]
+
+        for text, cmd in items:
+            def _make_cmd(action):
+                return lambda: self._trigger_action(action)
+
+            btn = ctk.CTkButton(
+                self,
+                text=text,
+                anchor="w",
+                font=("Segoe UI", 11, "bold"),
+                fg_color="transparent",
+                hover_color=self.colors["chip_hover"],
+                text_color=self.colors["text_primary"],
+                height=34,
+                corner_radius=8,
+                command=_make_cmd(cmd)
+            )
+            btn.pack(fill="x", padx=6, pady=2)
+            self._item_buttons.append(btn)
+
+    def _trigger_action(self, action):
+        self.hide()
+        if action:
+            action()
+
+    def show(self, anchor_widget, offset_y=None):
+        """Displays the popup right above the anchor widget (the '+' button)."""
+        self.lift()
+        self.colors = get_theme_colors()
+        self.apply_theme(self.colors)
+        if offset_y is None:
+            offset_y = -len(self._item_buttons) * 38 - 14
+        self.place(in_=anchor_widget, x=0, y=offset_y)
+        if self.on_state_change:
+            try:
+                self.on_state_change(True)
+            except Exception:
+                pass
+
+    def hide(self):
+        try:
+            self.place_forget()
+        except Exception:
+            pass
+        if self.on_state_change:
+            try:
+                self.on_state_change(False)
+            except Exception:
+                pass
+
+    def is_visible(self) -> bool:
+        return bool(self.winfo_ismapped())
+
+    def toggle(self, anchor_widget, offset_y=None):
+        if self.is_visible():
+            self.hide()
+        else:
+            self.show(anchor_widget, offset_y)
+
+    def apply_theme(self, colors):
+        self.colors = colors
+        self.configure(
+            fg_color=colors["bg_sidebar"],
+            border_color=colors["border_color"]
+        )
+        for btn in self._item_buttons:
+            btn.configure(
+                hover_color=colors["chip_hover"],
+                text_color=colors["text_primary"]
+            )

@@ -1,0 +1,61 @@
+{
+  "id": "session_20260913_110453_525c15",
+  "title": "who is the prime minister of india",
+  "created_at": "2026-09-13T11:04:53.249408",
+  "updated_at": "2026-09-13T11:37:11.313024",
+  "messages": [
+    {
+      "role": "user",
+      "content": "who is the prime minister of india",
+      "timestamp": "11:04 AM"
+    },
+    {
+      "role": "ai",
+      "content": "The current Prime Minister of India is **Shri Narendra Modi**. He has been serving as the **14th Prime Minister of India** since **May 26, 2014**.\n\nFor more details, you can visit the official [Prime Minister of India's website](https://pmindia.gov.in/).",
+      "timestamp": "11:04 AM",
+      "citations": [
+        "DuckDuckGo Web Search"
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Analyze and describe this photo in detail.",
+      "timestamp": "11:33 AM"
+    },
+    {
+      "role": "ai",
+      "content": "The image presents a food menu, neatly organized in a table format. The table is divided into two columns, each representing a different currency. The left column is labeled \"INR\" and the right column is labeled \"USD\".\n\nIn the left column, there are three items listed: \"Frooti\", \"Samosa\", and \"Chips\". Each item is accompanied by its price in Indian Rupees (INR). The prices for \"Frooti\" and \"Samosa\" are 10 INR and 12 INR respectively, while the price for \"Chips\" is 20 INR.\n\nThe right column, on the other hand, lists the prices of the same items in US Dollars (USD). The prices for \"Frooti\" and \"Samosa\" are 0.14 USD and 0.17 USD respectively, while the price for \"Chips\" is 0.28 USD.\n\nThe table is set against a clean, white background, making the black text stand out clearly. The overall layout of the table is simple and easy to read, providing a clear comparison of the prices of the items in both currencies.",
+      "timestamp": "11:33 AM",
+      "citations": [
+        "Mistral Pixtral Vision (pixtral-12b-2409)"
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Analyze and describe this photo in detail.",
+      "timestamp": "11:35 AM"
+    },
+    {
+      "role": "ai",
+      "content": "The image you've shared is a black square with white text that reads \"what is the time complexity of quicksort in best case\". The text is centered in the image and is written in a sans-serif font. The background of the image is black, providing a stark contrast to the white text. The text appears to be asking about the time complexity of the quicksort algorithm in its best-case scenario. However, without additional context or the ability to perform a search, I'm unable to provide the answer to this question.",
+      "timestamp": "11:35 AM",
+      "citations": [
+        "Mistral Pixtral Vision (pixtral-12b-2409)"
+      ]
+    },
+    {
+      "role": "user",
+      "content": "what is the time complexity of quicksort in best case",
+      "timestamp": "11:37 AM"
+    },
+    {
+      "role": "ai",
+      "content": "The **best-case time complexity of Quicksort** is **O(n log n)**.\n\nIn the best case, the pivot divides the array into two nearly equal halves at each step, leading to a balanced recursion tree. This results in efficient sorting with logarithmic depth and linear work at each level.\n\n*(Note: This assumes a good pivot selection strategy, such as randomized or median-of-three.)*",
+      "timestamp": "11:37 AM",
+      "citations": [
+        "B.docx",
+        "merge 2 sorted array.txt"
+      ]
+    }
+  ]
+}

@@ -32,108 +32,9 @@ class ChatView(ctk.CTkScrollableFrame):
         self.messages: List[Dict[str, Any]] = []
         self._cards: List[ChatMessageCard] = []
         self.is_mobile_mode = False
-
-        # Touch & mouse drag scrolling state
-        self._drag_y = 0
-        self._is_dragging = False
-
-        # Bind touch/mouse drag scrolling to canvas and self
-        try:
-            self._parent_canvas.bind("<ButtonPress-1>", self._on_drag_start, add=True)
-            self._parent_canvas.bind("<B1-Motion>", self._on_drag_motion, add=True)
-            self.bind("<ButtonPress-1>", self._on_drag_start, add=True)
-            self.bind("<B1-Motion>", self._on_drag_motion, add=True)
-        except Exception:
-            pass
+        self._scroll_pending = False
 
         self._show_welcome_hero()
-
-    def _on_drag_start(self, event):
-        self._drag_y = event.y_root
-        self._is_dragging = False
-
-    def _on_drag_motion(self, event):
-        dy = event.y_root - self._drag_y
-        if abs(dy) >= 2:
-            self._is_dragging = True
-            try:
-                self._parent_canvas.yview_scroll(-int(dy), "units")
-            except Exception:
-                pass
-            self._drag_y = event.y_root
-
-    def _check_if_valid_scroll(self, widget):
-        """Allows mouse wheel scrolling over any part of the chat view or its child response cards."""
-        if widget == self._parent_canvas or widget == self:
-            return True
-        elif str(widget).startswith(str(self)) or str(widget).startswith(str(self._parent_canvas)) or str(widget).startswith(str(self._parent_frame)):
-            return True
-        elif widget.master is not None:
-            return self._check_if_valid_scroll(widget.master)
-        return False
-
-    def _mouse_wheel_all(self, event):
-        """Unified responsive mouse wheel handler for Windows, macOS, and Linux."""
-        if self._check_if_valid_scroll(event.widget):
-            self._scroll_canvas(event)
-
-    def _scroll_canvas(self, event):
-        """Scrolls the canvas with natural, responsive velocity."""
-        try:
-            if not hasattr(self, "_parent_canvas") or not self._parent_canvas.winfo_exists():
-                return
-            if sys.platform.startswith("win"):
-                # On Windows with yscrollincrement=1, event.delta is 120 per notch.
-                # delta / 2 gives 60px per notch (standard natural browser/editor scrolling speed).
-                step = -int(event.delta / 2)
-                if getattr(self, "_shift_pressed", False):
-                    self._parent_canvas.xview("scroll", step, "units")
-                else:
-                    self._parent_canvas.yview("scroll", step, "units")
-            elif sys.platform == "darwin":
-                step = -int(event.delta * 2)
-                if getattr(self, "_shift_pressed", False):
-                    self._parent_canvas.xview("scroll", step, "units")
-                else:
-                    self._parent_canvas.yview("scroll", step, "units")
-            else:
-                # Linux (Button-4 / Button-5)
-                step = -2 if (hasattr(event, "num") and event.num == 4) else 2
-                if getattr(self, "_shift_pressed", False):
-                    self._parent_canvas.xview_scroll(step, "units")
-                else:
-                    self._parent_canvas.yview_scroll(step, "units")
-        except Exception:
-            pass
-
-    def bind_scroll_recursive(self, widget):
-        """Recursively binds mouse wheel to all descendant widgets so hovering anywhere over response cards scrolls the feed."""
-        if not widget:
-            return
-
-        def _on_wheel(e):
-            self._scroll_canvas(e)
-            return "break"
-
-        for evt in ["<MouseWheel>", "<Button-4>", "<Button-5>"]:
-            try:
-                widget.bind(evt, _on_wheel, add=True)
-            except Exception:
-                pass
-            for attr in ["_textbox", "_label", "_canvas", "_parent_frame", "_frame", "_entry"]:
-                if hasattr(widget, attr):
-                    target = getattr(widget, attr)
-                    if target and hasattr(target, "bind"):
-                        try:
-                            target.bind(evt, _on_wheel, add=True)
-                        except Exception:
-                            pass
-
-        try:
-            for child in widget.winfo_children():
-                self.bind_scroll_recursive(child)
-        except Exception:
-            pass
 
     def set_mobile_mode(self, is_mobile: bool):
         """Switches chat view layout padding and hero grid between mobile and desktop."""
@@ -169,27 +70,27 @@ class ChatView(ctk.CTkScrollableFrame):
 
         # Welcome Icon & Title
         title_font_size = 15 if self.is_mobile_mode else 20
-        title = ctk.CTkLabel(
+        self.hero_title = ctk.CTkLabel(
             self.hero_frame,
             text="✨ Welcome to Search Studio",
             font=("Segoe UI", title_font_size, "bold"),
             text_color=self.colors["accent_primary"]
         )
-        title.pack(anchor="w", padx=16 if self.is_mobile_mode else 24, pady=(16 if self.is_mobile_mode else 20, 4))
+        self.hero_title.pack(anchor="w", padx=16 if self.is_mobile_mode else 24, pady=(16 if self.is_mobile_mode else 20, 4))
 
         desc_text = (
             "Ask questions from your documents, code, or query live web intelligence."
             if self.is_mobile_mode else
             "Your multi-modal RAG knowledge engine. Ask questions from your PDFs, Word documents,\ncode, spreadsheets, or query live web intelligence with voice & image support."
         )
-        desc = ctk.CTkLabel(
+        self.hero_desc = ctk.CTkLabel(
             self.hero_frame,
             text=desc_text,
             font=("Segoe UI", 11 if self.is_mobile_mode else 13),
             text_color=self.colors["text_secondary"],
             justify="left"
         )
-        desc.pack(anchor="w", padx=16 if self.is_mobile_mode else 24, pady=(0, 12 if self.is_mobile_mode else 16))
+        self.hero_desc.pack(anchor="w", padx=16 if self.is_mobile_mode else 24, pady=(0, 12 if self.is_mobile_mode else 16))
 
         # Quick Highlights Grid
         grid_frame = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
@@ -207,6 +108,7 @@ class ChatView(ctk.CTkScrollableFrame):
             ("🌐 Live Web & Images", "Automatic search fallbacks and inline image discovery")
         ]
 
+        self.hero_feature_widgets = []
         for idx, (f_title, f_sub) in enumerate(features):
             if self.is_mobile_mode:
                 row = idx
@@ -230,7 +132,7 @@ class ChatView(ctk.CTkScrollableFrame):
             f_s = ctk.CTkLabel(f_card, text=f_sub, font=("Segoe UI", 9 if self.is_mobile_mode else 10), text_color=self.colors["text_muted"])
             f_s.pack(anchor="w", padx=10, pady=(0, 6))
 
-        self.bind_scroll_recursive(self.hero_frame)
+            self.hero_feature_widgets.append((f_card, f_t, f_s))
 
     def remove_hero_if_needed(self):
         if hasattr(self, "hero_frame") and self.hero_frame:
@@ -241,8 +143,8 @@ class ChatView(ctk.CTkScrollableFrame):
                 pass
             self.hero_frame = None
 
-    def add_user_message(self, text: str) -> ChatMessageCard:
-        """Adds user chat card to feed (compact and right-aligned to fit content)."""
+    def add_user_message(self, text: str, image: Optional[Image.Image] = None) -> ChatMessageCard:
+        """Adds user chat card to feed (compact and right-aligned to fit content, with optional image attachment)."""
         self.remove_hero_if_needed()
         time_str = datetime.now().strftime("%I:%M %p")
         side_pad = 8 if self.is_mobile_mode else 25
@@ -251,11 +153,14 @@ class ChatView(ctk.CTkScrollableFrame):
             self,
             role="user",
             initial_text=text,
-            timestamp=time_str
+            timestamp=time_str,
+            on_view_image=self.on_view_image
         )
+        if image:
+            card.attach_image(image, text or "Uploaded Image")
+
         row_idx = len(self._cards)
         card.grid(row=row_idx, column=0, padx=side_pad, pady=(4, 4), sticky="e")
-        self.bind_scroll_recursive(card)
 
         self._cards.append(card)
         self.messages.append({"role": "user", "content": text, "timestamp": time_str})
@@ -278,7 +183,6 @@ class ChatView(ctk.CTkScrollableFrame):
         )
         row_idx = len(self._cards)
         card.grid(row=row_idx, column=0, padx=side_pad, pady=(4, 8), sticky="ew")
-        self.bind_scroll_recursive(card)
 
         self._cards.append(card)
         self.messages.append({"role": "ai", "content": initial_text, "timestamp": time_str})
@@ -299,7 +203,6 @@ class ChatView(ctk.CTkScrollableFrame):
         )
         row_idx = len(self._cards)
         card.grid(row=row_idx, column=0, padx=side_pad, pady=(2, 4), sticky="ew")
-        self.bind_scroll_recursive(card)
         self._cards.append(card)
         self.scroll_to_bottom()
 
@@ -314,16 +217,97 @@ class ChatView(ctk.CTkScrollableFrame):
                     last_msg["citations"] = citations
                     last_card.set_citations(citations)
                 last_card.finalize_content(full_text)
-                self.bind_scroll_recursive(last_card)
         self.scroll_to_bottom()
+
+    def reset_all_tts_buttons(self):
+        """Resets all AI response cards' TTS buttons back to '🔊 Speak'."""
+        for card in self._cards:
+            if hasattr(card, "set_speaking_state"):
+                try:
+                    card.set_speaking_state(False)
+                except Exception:
+                    pass
 
     def clear_chat(self):
         """Clears all cards and resets to welcome hero."""
+        self.reset_all_tts_buttons()
         for card in self._cards:
-            card.destroy()
+            try:
+                card.destroy()
+            except Exception:
+                pass
         self._cards = []
         self.messages = []
         self._show_welcome_hero()
+
+    def load_messages(self, messages: List[Dict[str, Any]]):
+        """Clears current view and reconstructs chat feed from a list of past messages."""
+        for card in self._cards:
+            try:
+                card.destroy()
+            except Exception:
+                pass
+        self._cards = []
+        self.messages = []
+
+        if not messages:
+            self._show_welcome_hero()
+            return
+
+        self.remove_hero_if_needed()
+        side_pad = 8 if self.is_mobile_mode else 25
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            ts = msg.get("timestamp") or datetime.now().strftime("%I:%M %p")
+            citations = msg.get("citations", [])
+
+            if role == "user":
+                card = ChatMessageCard(
+                    self,
+                    role="user",
+                    initial_text=content,
+                    timestamp=ts
+                )
+                row_idx = len(self._cards)
+                card.grid(row=row_idx, column=0, padx=side_pad, pady=(4, 4), sticky="e")
+                self._cards.append(card)
+                self.messages.append({"role": "user", "content": content, "timestamp": ts})
+
+            elif role == "ai":
+                card = ChatMessageCard(
+                    self,
+                    role="ai",
+                    initial_text=content,
+                    timestamp=ts,
+                    on_tts_click=self.on_tts_click,
+                    on_view_image=self.on_view_image
+                )
+                row_idx = len(self._cards)
+                card.grid(row=row_idx, column=0, padx=side_pad, pady=(4, 8), sticky="ew")
+                card.finalize_content(content)
+                if citations:
+                    card.set_citations(citations)
+                self._cards.append(card)
+                msg_entry = {"role": "ai", "content": content, "timestamp": ts}
+                if citations:
+                    msg_entry["citations"] = citations
+                self.messages.append(msg_entry)
+
+            elif role == "system":
+                card = ChatMessageCard(
+                    self,
+                    role="system",
+                    initial_text=content,
+                    timestamp=ts
+                )
+                row_idx = len(self._cards)
+                card.grid(row=row_idx, column=0, padx=side_pad, pady=(2, 4), sticky="ew")
+                self._cards.append(card)
+                self.messages.append({"role": "system", "content": content, "timestamp": ts})
+
+        self.scroll_to_bottom()
 
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         return self.messages
@@ -346,8 +330,20 @@ class ChatView(ctk.CTkScrollableFrame):
         self.colors = colors
         self.configure(fg_color=colors["bg_base"])
 
-        if hasattr(self, "hero_frame") and self.hero_frame:
-            self.hero_frame.configure(fg_color=colors["bg_sidebar"], border_color=colors["border_color"])
+        if hasattr(self, "hero_frame") and self.hero_frame and self.hero_frame.winfo_exists():
+            try:
+                self.hero_frame.configure(fg_color=colors["bg_sidebar"], border_color=colors["border_color"])
+                if hasattr(self, "hero_title") and self.hero_title and self.hero_title.winfo_exists():
+                    self.hero_title.configure(text_color=colors["accent_primary"])
+                if hasattr(self, "hero_desc") and self.hero_desc and self.hero_desc.winfo_exists():
+                    self.hero_desc.configure(text_color=colors["text_secondary"])
+                for f_card, f_t, f_s in getattr(self, "hero_feature_widgets", []):
+                    if f_card.winfo_exists():
+                        f_card.configure(fg_color=colors["chip_bg"], border_color=colors["border_color"])
+                        f_t.configure(text_color=colors["text_primary"])
+                        f_s.configure(text_color=colors["text_muted"])
+            except Exception:
+                pass
 
         for card in self._cards:
             card.apply_theme(colors)

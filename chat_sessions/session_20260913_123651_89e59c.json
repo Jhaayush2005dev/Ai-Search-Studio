@@ -1,0 +1,21 @@
+{
+  "id": "session_20260913_123651_89e59c",
+  "title": "what is oops in java",
+  "created_at": "2026-09-13T12:36:51.840315",
+  "updated_at": "2026-09-13T12:37:01.292241",
+  "messages": [
+    {
+      "role": "user",
+      "content": "what is oops in java",
+      "timestamp": "12:36 PM"
+    },
+    {
+      "role": "ai",
+      "content": "**Object-Oriented Programming (OOP) in Java** is a programming paradigm that organizes code into **objects** (instances of classes) rather than just functions and logic. It is the foundation of Java programming and revolves around key concepts:\n\n### **Core OOP Concepts in Java**\n1. **Class**\n   - A **blueprint** or template for creating objects.\n   - Defines **properties (attributes)** and **behaviors (methods)**.\n   - Example:\n     ```java\n     class Car { // Class\n         String model; // Property\n         void drive() { // Method (behavior)\n             System.out.println(\"Driving...\");\n         }\n     }\n     ```\n\n2. **Object**\n   - An **instance** of a class.\n   - Example:\n     ```java\n     Car myCar = new Car(); // Object created from the Car class\n     ```\n\n3. **Inheritance**\n   - Allows a **child class** to inherit properties/methods from a **parent class**.\n   - Promotes **code reusability**.\n\n4. **Polymorphism**\n   - Enables **one interface** to represent different underlying forms (e.g., method overriding).\n   - Example: A `Shape` class with methods like `draw()` can be overridden in `Circle` or `Square`.\n\n5. **Encapsulation**\n   - Bundles data (variables) and methods that operate on the data within a **single unit (class)**.\n   - Restricts direct access to some components (using `private` and `public` modifiers).\n\n6. **Abstraction**\n   - Hides complex implementation details and exposes only essential features.\n   - Achieved via **abstract classes** or **interfaces**.\n\n---\n### **Why Use OOP in Java?**\n- **Modularity**: Code is organized into reusable components (classes/objects).\n- **Scalability**: Easier to maintain and extend applications.\n- **Security**: Encapsulation protects data integrity.\n- **Real-world modeling**: Objects mirror real-world entities (e.g., `User`, `BankAccount`).\n\n---\n### **Learn More**\n- [Java OOPs Concepts (Tutorial)](https://www.javatpoint.com/oops-concepts)\n- [Java Classes & Objects (Official Oracle Docs)](https://docs.oracle.com/javase/tutorial/java/concepts/)",
+      "timestamp": "12:36 PM",
+      "citations": [
+        "DuckDuckGo Web Search"
+      ]
+    }
+  ]
+}
