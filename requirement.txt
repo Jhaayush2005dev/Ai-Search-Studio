@@ -44,3 +44,7 @@ python-dotenv
 tiktoken
 requests
 tqdm
+
+# Hosted web entry point
+fastapi
+uvicorn[standard]

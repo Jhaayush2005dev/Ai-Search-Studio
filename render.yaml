@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ai-search-studio
+    runtime: python
+    buildCommand: pip install -r requirement.txt
+    startCommand: uvicorn web_app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: MISTRAL_API_KEY
+        sync: false
