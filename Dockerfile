@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-# Create user with UID 1000 (standard requirement for Hugging Face Spaces non-root containers)
+# Create non-root user with UID 1000 (Hugging Face / Render / standard secure containers)
 RUN useradd -m -u 1000 user
 USER user
 ENV HOME=/home/user \
@@ -20,16 +20,19 @@ ENV HOME=/home/user \
 
 WORKDIR $HOME/app
 
-# Install Python dependencies
-COPY --chown=user:user requirements.txt .
+# Install Python dependencies using clean web-only requirements
+COPY --chown=user:user requirements-web.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements-web.txt
 
 # Copy application source code
 COPY --chown=user:user . .
 
-# Expose default Hugging Face Spaces port
+# Ensure storage directories exist with write access
+RUN mkdir -p chroma_db "documents loaders" chat_sessions static && \
+    chmod -R 777 chroma_db "documents loaders" chat_sessions static
+
 EXPOSE 7860
 
-# Run FastAPI app
-CMD ["uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "7860"]
+# Run FastAPI app with dynamic port support
+CMD ["sh", "-c", "uvicorn web_app:app --host 0.0.0.0 --port ${PORT:-7860}"]

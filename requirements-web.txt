@@ -1,0 +1,29 @@
+# FastAPI Server & Utilities
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+requests
+tiktoken
+
+# LangChain & Mistral
+langchain
+langchain-core
+langchain-community
+langchain-text-splitters
+langchain-mistralai
+mistralai
+
+# Vector Database
+chromadb
+
+# Document Parsing
+pypdf
+python-docx
+pandas
+pillow
+pytesseract
+
+# Web Search
+duckduckgo-search
+wikipedia
