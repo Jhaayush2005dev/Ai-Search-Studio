@@ -1,50 +1,33 @@
-# Core LangChain
+# Web & Cloud Deployment Requirements
+# Compatible with Render, Hugging Face Spaces, Railway, Docker, etc.
+
+# FastAPI Server & Utilities
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+requests
+tiktoken
+
+# LangChain & Mistral
 langchain
 langchain-core
 langchain-community
 langchain-text-splitters
-
-# LLM Providers & Embeddings
 langchain-mistralai
 mistralai
-sentence-transformers
 
 # Vector Database
 chromadb
 
-# Document Loaders & Formats
+# Document Parsing
 pypdf
 python-docx
-reportlab
 pandas
-numpy
-unstructured
-beautifulsoup4
-lxml
-
-# OCR & Image Processing
 pillow
 pytesseract
+beautifulsoup4
 
-# Web Search & Fallbacks
+# Web Search
 duckduckgo-search
 wikipedia
-
-# Voice (STT & Neural TTS)
-SpeechRecognition
-edge-tts
-pygame
-pyttsx3
-pypiwin32; sys_platform == 'win32'
-comtypes; sys_platform == 'win32'
-
-# UI Framework & Utilities
-customtkinter
-python-dotenv
-tiktoken
-requests
-tqdm
-
-# Hosted web entry point
-fastapi
-uvicorn[standard]

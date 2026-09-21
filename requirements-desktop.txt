@@ -1,0 +1,21 @@
+# AI Search Studio - Desktop Application Requirements
+# Run: pip install -r requirements-desktop.txt
+
+# Base Web & Core Requirements
+-r requirements-web.txt
+
+# Desktop GUI Framework
+customtkinter
+
+# Desktop Voice & Audio (STT & Local Neural TTS)
+SpeechRecognition
+edge-tts
+pygame
+pyttsx3
+pypiwin32; sys_platform == 'win32'
+comtypes; sys_platform == 'win32'
+
+# Additional Formats & Local Embeddings
+reportlab
+sentence-transformers
+tqdm

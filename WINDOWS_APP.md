@@ -2,9 +2,13 @@
 
 The current desktop application is packaged with PyInstaller as a one-folder Windows app.
 
-## Build
+## Setup & Build
 
 ```powershell
+# Install desktop dependencies (includes GUI and voice playback)
+pip install -r requirements-desktop.txt
+
+# Package application with PyInstaller
 .\venv\Scripts\python.exe -m PyInstaller --clean --noconfirm ai_search_studio.spec
 ```
 
