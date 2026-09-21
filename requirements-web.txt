@@ -27,3 +27,4 @@ pytesseract
 # Web Search
 duckduckgo-search
 wikipedia
+beautifulsoup4
