@@ -805,8 +805,8 @@ HTML_PAGE = r"""<!doctype html>
 
     /* Top Action Bar */
     .top-header-bar {
-      height: 52px;
-      min-height: 52px;
+      height: 50px;
+      min-height: 50px;
       background: var(--bg-sidebar);
       border-bottom: 1px solid var(--border-color);
       display: flex;
@@ -816,47 +816,66 @@ HTML_PAGE = r"""<!doctype html>
       z-index: 10;
     }
 
-    .header-brand {
+    .top-header-left {
       display: flex;
       align-items: center;
       gap: 10px;
     }
-    .brand-logo-icon {
-      width: 28px;
-      height: 28px;
+
+    .sidebar-brand-header {
       display: flex;
       align-items: center;
-      justify-content: center;
-      font-size: 18px;
+      justify-content: space-between;
+      padding: 4px 0 6px 0;
+      margin-bottom: 4px;
     }
-    .brand-title {
-      font-size: 15px;
+    .sidebar-brand-title {
+      font-size: 16px;
       font-weight: 700;
       letter-spacing: -0.01em;
-      color: #ffffff;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
-    .badge-ver {
-      font-size: 9px;
-      font-weight: 600;
+    .sidebar-brand-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sidebar-close-btn {
+      display: none;
+      background: transparent;
+      border: none;
       color: var(--text-muted);
-      background: var(--chip-bg);
-      border: 1px solid var(--border-color);
-      padding: 1px 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 2px 6px;
       border-radius: 4px;
+    }
+    .sidebar-close-btn:hover {
+      background: var(--chip-hover);
+      color: var(--text-primary);
+    }
+    @media (max-width: 768px) {
+      .sidebar-close-btn { display: block; }
     }
 
     /* Status Pill */
     .status-pill {
-      display: flex;
+      display: inline-flex;
       align-items: center;
       gap: 7px;
-      background: var(--bg-base);
+      background: var(--chip-bg);
       border: 1px solid var(--border-color);
-      border-radius: 20px;
-      padding: 4px 14px;
+      border-radius: 12px;
+      padding: 3px 12px;
+      height: 26px;
       font-size: 11px;
-      font-weight: 600;
-      color: var(--text-primary);
+      font-weight: 500;
+      color: var(--text-secondary);
+      box-sizing: border-box;
     }
     .status-dot {
       width: 7px;
@@ -886,7 +905,7 @@ HTML_PAGE = r"""<!doctype html>
       border-radius: 6px;
       color: var(--text-primary);
       font-size: 11px;
-      font-weight: 600;
+      font-weight: 700;
       padding: 5px 12px;
       height: 30px;
       cursor: pointer;
@@ -902,6 +921,7 @@ HTML_PAGE = r"""<!doctype html>
     .btn-clear-chat {
       background: transparent;
       border: none;
+      font-weight: 500;
       color: var(--text-muted);
     }
     .btn-clear-chat:hover {
@@ -924,8 +944,6 @@ HTML_PAGE = r"""<!doctype html>
     }
     @media (max-width: 768px) {
       .hamburger-btn { display: flex; }
-      .brand-title { display: none; }
-      .badge-ver { display: none; }
     }
 
     /* ========================================================
@@ -1005,141 +1023,194 @@ HTML_PAGE = r"""<!doctype html>
       line-height: 1.4;
     }
 
-    /* Chat Messages */
-    .message-row {
-      display: flex;
-      gap: 12px;
-      max-width: 900px;
-      width: 100%;
-      margin: 0 auto;
+    /* Chat Message Cards - Matching Local Desktop App (ChatMessageCard) */
+    .chat-message-card {
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
       animation: fadeIn 0.2s ease;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
     }
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(4px); }
       to { opacity: 1; transform: translateY(0); }
     }
 
-    .msg-avatar {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 16px;
-      flex-shrink: 0;
-      background: var(--bg-card-ai);
-      border: 1px solid var(--border-color);
-    }
-    .msg-avatar.ai {
-      background: linear-gradient(135deg, var(--accent-hover), var(--accent-primary));
-      color: #ffffff;
-      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+    .chat-message-card.user {
+      align-self: flex-end;
+      margin-left: auto;
+      width: fit-content;
+      max-width: 80%;
+      min-width: 140px;
+      background: var(--bg-card-user);
+      padding: 6px 12px 8px 12px;
     }
 
-    .msg-body-wrapper {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      min-width: 0;
+    .chat-message-card.ai {
+      align-self: flex-start;
+      width: 100%;
+      max-width: 100%;
+      background: var(--bg-card-ai);
+      padding: 8px 14px 10px 14px;
     }
-    .msg-meta-row {
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--text-muted);
+
+    .chat-message-card.system {
+      align-self: flex-start;
+      width: 100%;
+      background: var(--chip-bg);
+      padding: 6px 12px 8px 12px;
+    }
+
+    .card-top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+      user-select: none;
+    }
+
+    .card-top-left {
       display: flex;
       align-items: center;
       gap: 8px;
     }
 
-    .msg-bubble {
-      background: var(--bg-card-ai);
-      border: 1px solid var(--border-color);
-      border-radius: 12px;
-      padding: 14px 16px;
-      font-size: 13.5px;
-      line-height: 1.6;
-      word-wrap: break-word;
-      color: var(--text-primary);
+    .card-avatar {
+      font-size: 11px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
-    .message-row.user .msg-bubble {
-      background: var(--bg-card-user);
-      border-color: var(--border-color);
+    .chat-message-card.user .card-avatar {
+      color: var(--text-secondary);
+    }
+    .chat-message-card.ai .card-avatar {
+      color: var(--accent-primary);
+    }
+    .chat-message-card.system .card-avatar {
+      color: var(--text-muted);
     }
 
-    /* Markdown styling */
-    .msg-bubble p { margin-bottom: 8px; }
-    .msg-bubble p:last-child { margin-bottom: 0; }
-    .msg-bubble code {
+    .card-timestamp {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .card-top-right {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .card-action-btn {
+      background: transparent;
+      border: none;
+      font-size: 10px;
+      font-weight: 600;
+      font-family: inherit;
+      color: var(--text-muted);
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .card-action-btn:hover {
+      background: var(--chip-hover);
+      color: var(--text-primary);
+    }
+
+    .card-content {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-primary);
+      word-break: break-word;
+      font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    }
+    .card-content p {
+      margin-top: 0;
+      margin-bottom: 8px;
+    }
+    .card-content p:last-child {
+      margin-bottom: 0;
+    }
+    .card-content strong, .card-content b {
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .card-content a {
+      color: var(--accent-primary);
+      text-decoration: underline;
+      font-weight: 500;
+    }
+    .card-content a:hover {
+      text-decoration: underline;
+      color: var(--accent-hover);
+    }
+    .card-content ul, .card-content ol {
+      margin: 4px 0 8px 20px;
+      padding: 0;
+    }
+    .card-content li {
+      margin-bottom: 3px;
+    }
+    .card-content code {
       background: var(--bg-code);
       padding: 2px 5px;
       border-radius: 4px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 12px;
-      color: #79c0ff;
+      font-family: Consolas, ui-monospace, Menlo, Monaco, monospace;
+      font-size: 11.5px;
+      color: #93c5fd;
     }
-    .msg-bubble pre {
+    .card-content pre {
       background: var(--bg-code);
-      padding: 12px;
+      padding: 10px 12px;
       border-radius: 8px;
       overflow-x: auto;
       margin: 8px 0;
       border: 1px solid var(--border-color);
     }
-    .msg-bubble pre code { background: transparent; padding: 0; }
-
-    /* Citations Tag Box */
-    .citations-container {
-      margin-top: 10px;
-      padding: 8px 12px;
-      border-radius: 8px;
-      background: rgba(0,0,0,0.2);
-      border-left: 3px solid var(--accent-primary);
-      font-size: 11px;
+    .card-content pre code {
+      background: transparent;
+      padding: 0;
+      color: #93c5fd;
+      font-size: 12px;
     }
-    .citations-title {
+
+    /* Code block card top header */
+    .code-header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 2px 4px 6px;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 8px;
+    }
+    .code-lang-label {
+      font-family: Consolas, monospace;
+      font-size: 10px;
       font-weight: 700;
-      color: var(--accent-primary);
-      margin-bottom: 4px;
-      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: lowercase;
     }
-    .citation-pills {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-    .citation-chip {
-      padding: 3px 8px;
-      border-radius: 4px;
-      background: var(--chip-bg);
-      border: 1px solid var(--border-color);
-      color: var(--text-secondary);
-      font-size: 10.5px;
-      text-decoration: none;
-    }
-    .citation-chip:hover { border-color: var(--accent-primary); }
-
-    /* Message Action Buttons */
-    .msg-actions-row {
-      display: flex;
-      gap: 8px;
-      margin-top: 4px;
-    }
-    .msg-action-btn {
+    .code-copy-btn {
       background: transparent;
       border: none;
+      font-size: 10px;
+      font-weight: 600;
       color: var(--text-muted);
       cursor: pointer;
-      font-size: 11px;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 3px 8px;
+      padding: 1px 6px;
       border-radius: 4px;
-      transition: background 0.15s, color 0.15s;
     }
-    .msg-action-btn:hover { background: var(--chip-bg); color: var(--text-primary); }
+    .code-copy-btn:hover {
+      background: var(--chip-hover);
+      color: var(--text-primary);
+    }
 
     /* ========================================================
        PROMPT CHIPS & BOTTOM INPUT SECTION
@@ -1446,6 +1517,15 @@ HTML_PAGE = r"""<!doctype html>
     <!-- 1. LEFT SIDEBAR -->
     <aside id="sidebar">
       <div class="sidebar-inner">
+        <!-- Sidebar Brand Header (Exact Desktop Styling) -->
+        <div class="sidebar-brand-header">
+          <div class="sidebar-brand-title">🧠 Search Studio</div>
+          <div class="sidebar-brand-right">
+            <span class="badge-ver">v2.0</span>
+            <button class="sidebar-close-btn" onclick="toggleSidebarDrawer(false)" title="Close Sidebar">✕</button>
+          </div>
+        </div>
+
         <!-- Upload Files & Analytics Stats Buttons -->
         <div class="sidebar-btn-row">
           <button class="btn-upload" onclick="triggerFileInput()" title="Upload PDF, Word, CSV, Code, Images">
@@ -1523,17 +1603,12 @@ HTML_PAGE = r"""<!doctype html>
     <main id="main-panel">
       <!-- Top Action Bar -->
       <header class="top-header-bar">
-        <div class="header-brand">
+        <div class="top-header-left">
           <button class="hamburger-btn" onclick="toggleSidebarDrawer(true)" title="Menu">☰</button>
-          <div class="brand-logo-icon">🧠</div>
-          <span class="brand-title">Search Studio</span>
-          <span class="badge-ver">v2.0</span>
-        </div>
-
-        <!-- Center Status Pill -->
-        <div class="status-pill" id="header-status-pill">
-          <div class="status-dot" id="status-dot"></div>
-          <span id="status-pill-text">Ready (0 Chunks)</span>
+          <div class="status-pill" id="header-status-pill">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-pill-text">Ready</span>
+          </div>
         </div>
 
         <!-- Right Quick Action Buttons -->
@@ -1748,6 +1823,24 @@ HTML_PAGE = r"""<!doctype html>
     const savedTheme = localStorage.getItem('search_studio_theme') || 'Developer Dark';
     document.documentElement.setAttribute('data-theme', savedTheme);
     if (themeSelect) themeSelect.value = savedTheme;
+
+    // Configure Marked for GitHub Flavored Markdown and secure new-tab links
+    try {
+      if (typeof marked !== 'undefined') {
+        marked.setOptions({ breaks: true, gfm: true });
+        const renderer = {
+          link(item) {
+            const href = item.href || (typeof item === 'string' ? item : '#');
+            const text = item.text || item.href || href;
+            const title = item.title ? ` title="${item.title}"` : '';
+            return `<a href="${href}"${title} target="_blank" rel="noopener noreferrer">${text}</a>`;
+          }
+        };
+        marked.use({ renderer });
+      }
+    } catch (e) {
+      console.log('Marked configuration notice:', e);
+    }
 
     // Service Worker Registration for PWA
     if ('serviceWorker' in navigator) {
@@ -2032,75 +2125,111 @@ HTML_PAGE = r"""<!doctype html>
     }
 
     // 8. CHAT RENDERING
+    function formatCurrentTime() {
+      const now = new Date();
+      return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+    }
+
+    function enhanceCodeBlocks(container) {
+      container.querySelectorAll('pre code').forEach(block => {
+        try { hljs.highlightElement(block); } catch (e) {}
+        const pre = block.parentElement;
+        if (pre && !pre.querySelector('.code-header-bar')) {
+          const langMatch = block.className.match(/language-(\w+)/);
+          const lang = langMatch ? langMatch[1] : 'code';
+          const header = document.createElement('div');
+          header.className = 'code-header-bar';
+          header.innerHTML = `
+            <span class="code-lang-label">${lang.toLowerCase()}</span>
+            <button class="code-copy-btn" onclick="copySnippet(this)">📋 Copy</button>
+          `;
+          pre.insertBefore(header, block);
+        }
+      });
+    }
+
+    function copySnippet(btn) {
+      const code = btn.closest('pre').querySelector('code').innerText;
+      navigator.clipboard.writeText(code);
+      btn.textContent = '✅ Copied!';
+      setTimeout(() => { btn.textContent = '📋 Copy'; }, 1500);
+    }
+
+    // 8. CHAT RENDERING - Matching Local Desktop App Cards
     function hideHeroIfVisible() {
       if (heroCard && heroCard.style.display !== 'none') {
         heroCard.style.display = 'none';
       }
     }
 
-    function addMessageRow(role, content, citations = []) {
+    function addMessageRow(role, content, citations = [], timestamp = null) {
       hideHeroIfVisible();
 
-      const row = document.createElement('div');
-      row.className = `message-row ${role}`;
+      const timeStr = timestamp || formatCurrentTime();
+      const card = document.createElement('div');
+      card.className = `chat-message-card ${role}`;
 
-      const avatar = role === 'ai' ? '🧠' : '👤';
-      const author = role === 'ai' ? 'AI Search Studio' : 'You';
-
-      let citationsHtml = '';
-      if (citations && citations.length > 0) {
-        citationsHtml = `
-          <div class="citations-container">
-            <div class="citations-title">Sources & Citations:</div>
-            <div class="citation-pills">
-              ${citations.map(c => `<span class="citation-chip">🔗 ${escapeHtml(c)}</span>`).join('')}
+      if (role === 'user') {
+        card.innerHTML = `
+          <div class="card-top-bar">
+            <div class="card-top-left">
+              <span class="card-avatar">👤 You</span>
+              <span class="card-timestamp">${escapeHtml(timeStr)}</span>
             </div>
           </div>
+          <div class="card-content">${escapeHtml(content).replace(/\n/g, '<br>')}</div>
         `;
-      }
-
-      let actionsHtml = '';
-      if (role === 'ai') {
-        actionsHtml = `
-          <div class="msg-actions-row">
-            <button class="msg-action-btn" onclick="copyMessage(this)">📋 Copy</button>
-            <button class="msg-action-btn" onclick="speakMessage(this)">🔊 Read Aloud</button>
+      } else if (role === 'ai') {
+        const parsedHtml = marked.parse(content);
+        card.innerHTML = `
+          <div class="card-top-bar">
+            <div class="card-top-left">
+              <span class="card-avatar">⚡ Assistant</span>
+              <span class="card-timestamp">${escapeHtml(timeStr)}</span>
+            </div>
+            <div class="card-top-right">
+              <button class="card-action-btn" onclick="copyMessage(this)">📋 Copy All</button>
+              <button class="card-action-btn" onclick="speakMessage(this)">🔊 Speak</button>
+            </div>
           </div>
+          <div class="card-content">${parsedHtml}</div>
+        `;
+      } else {
+        const parsedHtml = marked.parse(content);
+        card.innerHTML = `
+          <div class="card-top-bar">
+            <div class="card-top-left">
+              <span class="card-avatar">ℹ️ System</span>
+              <span class="card-timestamp">${escapeHtml(timeStr)}</span>
+            </div>
+          </div>
+          <div class="card-content">${parsedHtml}</div>
         `;
       }
 
-      const parsedHtml = role === 'ai' ? marked.parse(content) : escapeHtml(content).replace(/\n/g, '<br>');
-
-      row.innerHTML = `
-        <div class="msg-avatar ${role}">${avatar}</div>
-        <div class="msg-body-wrapper">
-          <div class="msg-meta-row">${author}</div>
-          <div class="msg-bubble">${parsedHtml}${citationsHtml}</div>
-          ${actionsHtml}
-        </div>
-      `;
-
-      chatViewport.appendChild(row);
-      row.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+      chatViewport.appendChild(card);
+      enhanceCodeBlocks(card);
       chatViewport.scrollTop = chatViewport.scrollHeight;
 
-      currentMessages.push({ role, content, citations });
-      return row;
+      currentMessages.push({ role, content, timestamp: timeStr, citations });
+      return card;
     }
 
     function addSystemCard(text) {
       hideHeroIfVisible();
-      const row = document.createElement('div');
-      row.className = 'message-row ai';
-      row.innerHTML = `
-        <div class="msg-avatar ai">⚡</div>
-        <div class="msg-body-wrapper">
-          <div class="msg-bubble" style="background: var(--bg-sidebar); border-left: 3px solid var(--accent-primary);">
-            ${marked.parse(text)}
+      const timeStr = formatCurrentTime();
+      const card = document.createElement('div');
+      card.className = 'chat-message-card system';
+      card.innerHTML = `
+        <div class="card-top-bar">
+          <div class="card-top-left">
+            <span class="card-avatar">ℹ️ System</span>
+            <span class="card-timestamp">${escapeHtml(timeStr)}</span>
           </div>
         </div>
+        <div class="card-content">${marked.parse(text)}</div>
       `;
-      chatViewport.appendChild(row);
+      chatViewport.appendChild(card);
       chatViewport.scrollTop = chatViewport.scrollHeight;
     }
 
@@ -2112,25 +2241,28 @@ HTML_PAGE = r"""<!doctype html>
 
       addMessageRow('user', query);
 
-      // Create streaming placeholder card
+      // Create streaming placeholder card matching Assistant design
       hideHeroIfVisible();
-      const streamRow = document.createElement('div');
-      streamRow.className = 'message-row ai';
-      streamRow.innerHTML = `
-        <div class="msg-avatar ai">🧠</div>
-        <div class="msg-body-wrapper">
-          <div class="msg-meta-row">AI Search Studio</div>
-          <div class="msg-bubble" id="active-stream-bubble">Thinking...</div>
-          <div class="msg-actions-row" id="active-stream-actions" style="display: none;">
-            <button class="msg-action-btn" onclick="copyMessage(this)">📋 Copy</button>
-            <button class="msg-action-btn" onclick="speakMessage(this)">🔊 Read Aloud</button>
+      const timeStr = formatCurrentTime();
+      const streamCard = document.createElement('div');
+      streamCard.className = 'chat-message-card ai';
+      streamCard.innerHTML = `
+        <div class="card-top-bar">
+          <div class="card-top-left">
+            <span class="card-avatar">⚡ Assistant</span>
+            <span class="card-timestamp">${escapeHtml(timeStr)}</span>
+          </div>
+          <div class="card-top-right" id="active-stream-actions" style="display: none;">
+            <button class="card-action-btn" onclick="copyMessage(this)">📋 Copy All</button>
+            <button class="card-action-btn" onclick="speakMessage(this)">🔊 Speak</button>
           </div>
         </div>
+        <div class="card-content" id="active-stream-content">Thinking...</div>
       `;
-      chatViewport.appendChild(streamRow);
+      chatViewport.appendChild(streamCard);
       chatViewport.scrollTop = chatViewport.scrollHeight;
 
-      const streamBubble = document.getElementById('active-stream-bubble');
+      const streamContent = document.getElementById('active-stream-content');
       let streamedTokens = "";
       let collectedCitations = [];
 
@@ -2152,31 +2284,19 @@ HTML_PAGE = r"""<!doctype html>
         streamedTokens = data.answer || "No response generated.";
         collectedCitations = data.citations || [];
 
-        let citationsHtml = '';
-        if (collectedCitations.length > 0) {
-          citationsHtml = `
-            <div class="citations-container">
-              <div class="citations-title">Sources & Citations:</div>
-              <div class="citation-pills">
-                ${collectedCitations.map(c => `<span class="citation-chip">🔗 ${escapeHtml(c)}</span>`).join('')}
-              </div>
-            </div>
-          `;
-        }
-
-        streamBubble.innerHTML = marked.parse(streamedTokens) + citationsHtml;
-        streamRow.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+        streamContent.innerHTML = marked.parse(streamedTokens);
+        enhanceCodeBlocks(streamCard);
         document.getElementById('active-stream-actions').style.display = 'flex';
 
-        currentMessages.push({ role: 'ai', content: streamedTokens, citations: collectedCitations });
+        currentMessages.push({ role: 'ai', content: streamedTokens, timestamp: timeStr, citations: collectedCitations });
 
         if (autoTtsEnabled) {
           speakCleanText(streamedTokens);
         }
       } catch (err) {
-        streamBubble.innerHTML = `<span style="color: var(--accent-danger);">⚠️ Error: ${escapeHtml(err.message)}</span>`;
+        streamContent.innerHTML = `<span style="color: var(--accent-danger);">⚠️ Error: ${escapeHtml(err.message)}</span>`;
       } finally {
-        streamBubble.removeAttribute('id');
+        streamContent.removeAttribute('id');
         const act = document.getElementById('active-stream-actions');
         if (act) act.removeAttribute('id');
         finishProcessingState();
@@ -2279,16 +2399,20 @@ HTML_PAGE = r"""<!doctype html>
     }
 
     function speakMessage(btn) {
-      const bubble = btn.closest('.msg-body-wrapper').querySelector('.msg-bubble');
-      speakCleanText(bubble.innerText);
+      const card = btn.closest('.chat-message-card') || btn.closest('.msg-body-wrapper');
+      const content = card ? (card.querySelector('.card-content') || card.querySelector('.msg-bubble')) : null;
+      if (content) speakCleanText(content.innerText);
     }
 
     function copyMessage(btn) {
-      const bubble = btn.closest('.msg-body-wrapper').querySelector('.msg-bubble');
-      navigator.clipboard.writeText(bubble.innerText);
-      const prev = btn.textContent;
-      btn.textContent = '✅ Copied!';
-      setTimeout(() => { btn.textContent = prev; }, 1500);
+      const card = btn.closest('.chat-message-card') || btn.closest('.msg-body-wrapper');
+      const content = card ? (card.querySelector('.card-content') || card.querySelector('.msg-bubble')) : null;
+      if (content) {
+        navigator.clipboard.writeText(content.innerText);
+        const prev = btn.textContent;
+        btn.textContent = '✅ Copied!';
+        setTimeout(() => { btn.textContent = prev; }, 1500);
+      }
     }
 
     // 12. SESSIONS & HISTORY MODAL
@@ -2325,7 +2449,7 @@ HTML_PAGE = r"""<!doctype html>
         chatViewport.innerHTML = '';
 
         if (data.messages && data.messages.length) {
-          data.messages.forEach(m => addMessageRow(m.role, m.content, m.citations || []));
+          data.messages.forEach(m => addMessageRow(m.role, m.content, m.citations || [], m.timestamp));
         } else {
           showHeroCard();
         }
