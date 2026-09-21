@@ -1,25 +1,30 @@
 import os
+import json
 import shutil
 import logging
+import base64
+import time
 from pathlib import Path
 from threading import Lock
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Generator
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.config import (
     DOCS_DIR, CHROMA_DIR, MISTRAL_API_KEY, AVAILABLE_MODELS, DEFAULT_MODEL,
-    SUPPORTED_EXTENSIONS
+    SUPPORTED_EXTENSIONS, THEMES, is_internet_available
 )
 from core.doc_loader import UniversalDocumentLoader
 from core.rag_engine import RAGEngine
+from core.session_manager import SessionManager
+from core.vision_service import VisionService
 
 logger = logging.getLogger("uvicorn.error")
 
-app = FastAPI(title="AI Search Studio", version="2.0.0")
+app = FastAPI(title="Search Studio", version="2.0.0")
 
 # Mount static folder
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -29,7 +34,27 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Shared singletons
 _doc_loader = UniversalDocumentLoader()
 _engine = RAGEngine(api_key=MISTRAL_API_KEY)
+_session_manager = SessionManager()
+_vision_service = VisionService(api_key=MISTRAL_API_KEY)
 _engine_lock = Lock()
+
+
+@app.on_event("startup")
+def startup_init_documents():
+    """Ingests any existing files in documents loaders/ folder into Chroma vector store."""
+    try:
+        doc_files = [str(f) for f in DOCS_DIR.iterdir() if f.is_file()]
+        if doc_files:
+            with _engine_lock:
+                chunks, meta, errors = _doc_loader.process_and_chunk(doc_files)
+                if chunks:
+                    _engine.add_documents(chunks, meta)
+                    logger.info(f"Startup: Indexed {len(meta)} files with {len(chunks)} chunks.")
+        else:
+            with _engine_lock:
+                _engine.init_vector_store()
+    except Exception as exc:
+        logger.warning(f"Startup doc loading notice: {exc}")
 
 
 class ChatRequest(BaseModel):
@@ -37,12 +62,21 @@ class ChatRequest(BaseModel):
     mode: Optional[str] = "Auto (Hybrid)"
     model: Optional[str] = DEFAULT_MODEL
     temperature: Optional[float] = 0.3
+    depth: Optional[int] = 4
+    session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     answer: str
     citations: list[str]
     status: str = "ok"
+
+
+class SettingsRequest(BaseModel):
+    mode: Optional[str] = None
+    model: Optional[str] = None
+    depth: Optional[int] = None
+    temperature: Optional[float] = None
 
 
 # ==========================================
@@ -66,29 +100,52 @@ def get_sw():
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "app": "AI Search Studio"}
+    return {"status": "ok", "app": "Search Studio", "version": "2.0.0"}
 
 
 # ==========================================
-# CONFIG & STATS ENDPOINTS
+# CONFIG & SETTINGS ENDPOINTS
 # ==========================================
 @app.get("/api/config")
 def get_config():
-    has_key = bool(_engine.api_key or os.getenv("MISTRAL_API_KEY"))
-    stats = _engine.get_knowledge_stats()
-    return {
-        "has_api_key": has_key,
-        "current_model": _engine.model_name,
-        "available_models": AVAILABLE_MODELS,
-        "current_mode": _engine.search_mode,
-        "available_modes": ["Auto (Hybrid)", "Docs Only", "Web Only"],
-        "knowledge_stats": stats,
-        "supported_extensions": list(SUPPORTED_EXTENSIONS.keys())
-    }
+    with _engine_lock:
+        has_key = bool(_engine.api_key or os.getenv("MISTRAL_API_KEY"))
+        stats = _engine.get_knowledge_stats()
+        return {
+            "has_api_key": has_key,
+            "current_model": _engine.model_name,
+            "available_models": AVAILABLE_MODELS,
+            "current_mode": _engine.search_mode,
+            "available_modes": ["Auto (Hybrid)", "Docs Only", "Web Only"],
+            "current_depth": _engine.context_depth,
+            "knowledge_stats": stats,
+            "supported_extensions": list(SUPPORTED_EXTENSIONS.keys()),
+            "themes": list(THEMES.keys())
+        }
+
+
+@app.post("/api/settings")
+def update_settings(req: SettingsRequest):
+    with _engine_lock:
+        if req.model:
+            _engine.set_model(req.model)
+        if req.mode:
+            _engine.set_search_mode(req.mode)
+        if req.depth is not None:
+            _engine.set_context_depth(req.depth)
+        if req.temperature is not None:
+            _engine.set_temperature(req.temperature)
+        return {
+            "status": "ok",
+            "model": _engine.model_name,
+            "mode": _engine.search_mode,
+            "depth": _engine.context_depth,
+            "temperature": _engine.temperature
+        }
 
 
 # ==========================================
-# DOCUMENT UPLOAD & MANAGEMENT ENDPOINTS
+# DOCUMENT MANAGEMENT ENDPOINTS
 # ==========================================
 @app.get("/api/documents")
 def list_documents():
@@ -114,8 +171,8 @@ async def upload_documents(files: List[UploadFile] = File(...)):
             chunks, meta, errors = _doc_loader.process_and_chunk(saved_paths)
             if chunks:
                 _engine.add_documents(chunks, meta)
+            stats = _engine.get_knowledge_stats()
 
-        stats = _engine.get_knowledge_stats()
         return {
             "status": "success",
             "files_indexed": len(meta),
@@ -132,41 +189,38 @@ async def upload_documents(files: List[UploadFile] = File(...)):
 def delete_document(filename: str):
     with _engine_lock:
         success = _engine.delete_source(filename)
-        # Also remove physical file if present
         target_file = DOCS_DIR / filename
         if target_file.exists():
             try:
                 target_file.unlink()
             except Exception:
                 pass
-        return {"status": "success" if success else "failed", "filename": filename}
+        stats = _engine.get_knowledge_stats()
+        return {"status": "success" if success else "failed", "filename": filename, "knowledge_stats": stats}
 
 
 @app.delete("/api/documents")
 def clear_all_documents():
     with _engine_lock:
         success = _engine.clear_knowledge_base()
-        # Clean folder
         for item in DOCS_DIR.iterdir():
             if item.is_file():
                 try:
                     item.unlink()
                 except Exception:
                     pass
-        return {"status": "success" if success else "failed"}
+        stats = _engine.get_knowledge_stats()
+        return {"status": "success" if success else "failed", "knowledge_stats": stats}
 
 
 # ==========================================
-# CHAT ENDPOINT
+# CHAT & STREAMING ENDPOINTS
 # ==========================================
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     current_key = _engine.api_key or os.getenv("MISTRAL_API_KEY", "")
     if not current_key:
-        raise HTTPException(
-            status_code=500,
-            detail="MISTRAL_API_KEY environment variable is not configured on server."
-        )
+        raise HTTPException(status_code=500, detail="MISTRAL_API_KEY environment variable is not configured.")
 
     with _engine_lock:
         if not _engine.api_key:
@@ -175,10 +229,10 @@ def chat(request: ChatRequest) -> ChatResponse:
 
         if request.model and request.model != _engine.model_name:
             _engine.set_model(request.model)
-
         if request.mode:
             _engine.set_search_mode(request.mode)
-
+        if request.depth is not None:
+            _engine.set_context_depth(request.depth)
         if request.temperature is not None:
             _engine.set_temperature(request.temperature)
 
@@ -201,29 +255,156 @@ def chat(request: ChatRequest) -> ChatResponse:
     )
 
 
+@app.post("/api/chat/stream")
+def chat_stream(request: ChatRequest):
+    current_key = _engine.api_key or os.getenv("MISTRAL_API_KEY", "")
+    if not current_key:
+        raise HTTPException(status_code=500, detail="MISTRAL_API_KEY environment variable is not configured.")
+
+    def event_stream():
+        citations: list[str] = []
+        status_updates: list[str] = []
+
+        def on_token(t: str):
+            yield f"data: {json.dumps({'token': t})}\n\n"
+
+        def on_status(s: str):
+            yield f"data: {json.dumps({'status': s})}\n\n"
+
+        # Apply settings
+        with _engine_lock:
+            if not _engine.api_key:
+                _engine.api_key = current_key
+                _engine._init_models()
+            if request.model:
+                _engine.set_model(request.model)
+            if request.mode:
+                _engine.set_search_mode(request.mode)
+            if request.depth is not None:
+                _engine.set_context_depth(request.depth)
+            if request.temperature is not None:
+                _engine.set_temperature(request.temperature)
+
+            token_queue: list[str] = []
+
+            def sync_token(tok):
+                token_queue.append(tok)
+
+            def sync_source(srcs):
+                citations.extend(srcs)
+
+            try:
+                full_text = _engine.stream_query(
+                    request.query.strip(),
+                    token_callback=sync_token,
+                    source_callback=sync_source,
+                )
+                for tok in token_queue:
+                    yield f"data: {json.dumps({'token': tok})}\n\n"
+
+                clean_citations = list(dict.fromkeys(citations))
+                yield f"data: {json.dumps({'citations': clean_citations})}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 # ==========================================
-# MAIN RESPONSIVE WEB & MOBILE UI
+# MULTIMODAL IMAGE ANALYSIS ENDPOINT
+# ==========================================
+@app.post("/api/analyze-image")
+async def analyze_image(
+    file: UploadFile = File(...),
+    prompt: Optional[str] = Form("Please analyze this image, solve any question contained within it, and explain key takeaways.")
+):
+    try:
+        contents = await file.read()
+        b64_str = base64.b64encode(contents).decode("utf-8")
+        ext = Path(file.filename).suffix.lower()
+        mime_type = "image/png" if ext == ".png" else "image/jpeg"
+
+        current_key = _vision_service.api_key or os.getenv("MISTRAL_API_KEY", "")
+        if not current_key:
+            raise HTTPException(status_code=500, detail="MISTRAL_API_KEY is not configured for image analysis.")
+
+        _vision_service.api_key = current_key
+        answer_parts = []
+        _vision_service.analyze_image_stream(
+            image_input=f"data:{mime_type};base64,{b64_str}",
+            prompt=prompt or "Analyze this image in detail.",
+            token_callback=answer_parts.append
+        )
+        return {"answer": "".join(answer_parts), "filename": file.filename}
+    except Exception as exc:
+        logger.error(f"Image analysis error: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ==========================================
+# SESSION MANAGEMENT ENDPOINTS
+# ==========================================
+@app.get("/api/sessions")
+def get_sessions(q: Optional[str] = None):
+    return _session_manager.list_sessions(search_query=q)
+
+
+@app.get("/api/sessions/{session_id}")
+def get_single_session(session_id: str):
+    sess = _session_manager.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return sess
+
+
+@app.post("/api/sessions")
+def save_chat_session(data: Dict[str, Any]):
+    sess_id = data.get("id") or _session_manager.create_session()["id"]
+    saved = _session_manager.save_session(
+        session_id=sess_id,
+        messages=data.get("messages", []),
+        title=data.get("title")
+    )
+    return saved or {"id": sess_id}
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_single_session(session_id: str):
+    success = _session_manager.delete_session(session_id)
+    return {"status": "success" if success else "failed"}
+
+
+@app.delete("/api/sessions")
+def clear_all_sessions_endpoint():
+    success = _session_manager.clear_all_sessions()
+    return {"status": "success" if success else "failed"}
+
+
+# ==========================================
+# MAIN RESPONSIVE WEB APPLICATION UI
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return HTML_PAGE
 
 
-HTML_PAGE = """<!doctype html>
-<html lang="en">
+HTML_PAGE = r"""<!doctype html>
+<html lang="en" data-theme="Developer Dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AI Search Studio</title>
-  <meta name="description" content="Intelligent Universal Document & Hybrid Web Search Studio">
+  <title>Search Studio v2.0</title>
+  <meta name="description" content="Search Studio - Multi-Modal RAG Knowledge Engine & Web Intelligence">
 
   <!-- PWA & Mobile Meta -->
   <link rel="manifest" href="/manifest.json">
-  <meta name="theme-color" content="#0d1117">
+  <meta name="theme-color" content="#131316">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="AI Search">
+  <meta name="apple-mobile-web-app-title" content="Search Studio">
   <link rel="icon" type="image/png" href="/static/icon-192.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
 
@@ -233,35 +414,110 @@ HTML_PAGE = """<!doctype html>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
   <style>
-    :root {
-      --bg-base: #0d1117;
-      --bg-surface: #161b22;
-      --bg-card: #21262d;
-      --bg-input: #1e242c;
-      --border-subtle: #30363d;
-      --border-focus: #58a6ff;
-      --accent-primary: #38bdf8;
-      --accent-hover: #0284c7;
-      --accent-success: #3fb950;
-      --accent-warning: #d29922;
-      --accent-danger: #f85149;
-      --text-main: #f0f6fc;
-      --text-muted: #8b949e;
+    /* ========================================================
+       THEMES DEFINITION (Developer Dark, Obsidian, Nordic, Light)
+       ======================================================== */
+    :root, [data-theme="Developer Dark"] {
+      --bg-base: #131316;
+      --bg-sidebar: #18181c;
+      --bg-card-ai: #1c1c22;
+      --bg-card-user: #23232b;
+      --bg-input: #19191e;
+      --bg-code: #101014;
+      --accent-primary: #6366f1;
+      --accent-hover: #4f46e5;
+      --accent-success: #10b981;
+      --accent-warning: #f59e0b;
+      --accent-danger: #ef4444;
+      --text-primary: #e4e4e7;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      --border-color: #272732;
+      --chip-bg: #1e1e26;
+      --chip-hover: #292934;
       --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-    body {
-      background-color: var(--bg-base);
-      color: var(--text-main);
-      font-family: var(--font-family);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      overflow-x: hidden;
+    [data-theme="Obsidian Slate"] {
+      --bg-base: #0f1115;
+      --bg-sidebar: #14171d;
+      --bg-card-ai: #181c23;
+      --bg-card-user: #202630;
+      --bg-input: #14171d;
+      --bg-code: #0b0d10;
+      --accent-primary: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --accent-success: #34d399;
+      --accent-warning: #fbbf24;
+      --accent-danger: #f87171;
+      --text-primary: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --border-color: #232934;
+      --chip-bg: #1c212a;
+      --chip-hover: #262c38;
     }
 
-    /* App Shell Container */
+    [data-theme="Nordic Dark"] {
+      --bg-base: #1a1c23;
+      --bg-sidebar: #20232c;
+      --bg-card-ai: #252834;
+      --bg-card-user: #2d3140;
+      --bg-input: #20232c;
+      --bg-code: #16171d;
+      --accent-primary: #818cf8;
+      --accent-hover: #6366f1;
+      --accent-success: #86efac;
+      --accent-warning: #fde047;
+      --accent-danger: #fca5a5;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --border-color: #2f3444;
+      --chip-bg: #282c3b;
+      --chip-hover: #34394c;
+    }
+
+    [data-theme="Developer Light"] {
+      --bg-base: #f4f4f5;
+      --bg-sidebar: #fafafa;
+      --bg-card-ai: #ffffff;
+      --bg-card-user: #ececee;
+      --bg-input: #ffffff;
+      --bg-code: #e4e4e7;
+      --accent-primary: #4f46e5;
+      --accent-hover: #4338ca;
+      --accent-success: #059669;
+      --accent-warning: #d97706;
+      --accent-danger: #dc2626;
+      --text-primary: #18181b;
+      --text-secondary: #52525b;
+      --text-muted: #71717a;
+      --border-color: #e4e4e7;
+      --chip-bg: #e4e4e7;
+      --chip-hover: #d4d4d8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+    body {
+      background-color: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-family);
+      min-height: 100vh;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+    /* App Layout */
     #app-container {
       display: flex;
       flex: 1;
@@ -270,150 +526,273 @@ HTML_PAGE = """<!doctype html>
       position: relative;
     }
 
-    /* Sidebar (Desktop Persistent, Mobile Drawer) */
+    /* ========================================================
+       SIDEBAR STYLING
+       ======================================================== */
     #sidebar {
-      width: 320px;
-      background: var(--bg-surface);
-      border-right: 1px solid var(--border-subtle);
+      width: 280px;
+      min-width: 280px;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border-color);
       display: flex;
       flex-direction: column;
-      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      transition: transform 0.25s ease;
       z-index: 100;
+      overflow-y: auto;
     }
 
-    /* Mobile Sidebar overlay */
+    .sidebar-inner {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      height: 100%;
+    }
+
+    /* Upload & Stats Row */
+    .sidebar-btn-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .btn-upload {
+      flex: 1;
+      height: 34px;
+      background: var(--accent-primary);
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-upload:hover { background: var(--accent-hover); }
+
+    .btn-stats {
+      width: 34px;
+      height: 34px;
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .btn-stats:hover { background: var(--chip-hover); color: var(--text-primary); }
+
+    /* Uploaded Files Section Header */
+    .section-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 4px;
+    }
+    .section-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .section-count-badge {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    /* Uploaded Files List */
+    .sources-scroll-box {
+      background: var(--bg-base);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 6px;
+      min-height: 140px;
+      max-height: 180px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .source-card {
+      background: var(--bg-card-ai);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      transition: border-color 0.15s;
+    }
+    .source-card:hover { border-color: var(--accent-primary); }
+
+    .source-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+      min-width: 0;
+    }
+    .source-icon { font-size: 14px; flex-shrink: 0; }
+    .source-name {
+      font-weight: 600;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+    }
+    .source-meta {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 1px;
+    }
+
+    .source-del-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 12px;
+      border-radius: 4px;
+      transition: color 0.15s;
+    }
+    .source-del-btn:hover { color: var(--accent-danger); }
+
+    .sources-empty {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-style: italic;
+      text-align: center;
+      padding: 35px 10px;
+    }
+
+    /* Sidebar Dropdowns and Sliders */
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .control-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .control-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .depth-val-indicator {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--accent-primary);
+    }
+
+    .select-menu {
+      width: 100%;
+      height: 30px;
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-size: 11px;
+      padding: 0 8px;
+      outline: none;
+      cursor: pointer;
+    }
+    .select-menu:focus { border-color: var(--accent-primary); }
+
+    .range-slider {
+      width: 100%;
+      accent-color: var(--accent-primary);
+      cursor: pointer;
+      height: 5px;
+      background: var(--chip-bg);
+      border-radius: 4px;
+      outline: none;
+      margin: 4px 0;
+    }
+
+    /* Switch Style */
+    .switch-container {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      margin-top: 2px;
+    }
+    .switch-track {
+      width: 32px;
+      height: 18px;
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      position: relative;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .switch-track.active {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+    }
+    .switch-thumb {
+      width: 12px;
+      height: 12px;
+      background: #ffffff;
+      border-radius: 50%;
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      transition: transform 0.2s;
+    }
+    .switch-track.active .switch-thumb {
+      transform: translateX(14px);
+    }
+    .switch-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    /* Mobile Backdrop & Drawer */
+    #drawer-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      z-index: 99;
+      backdrop-filter: blur(3px);
+    }
+    #drawer-backdrop.active { display: block; }
+
     @media (max-width: 768px) {
       #sidebar {
         position: fixed;
         top: 0;
         bottom: 0;
         left: 0;
-        width: 86vw;
-        max-width: 340px;
+        width: 84vw;
+        max-width: 320px;
         transform: translateX(-100%);
-        box-shadow: 4px 0 24px rgba(0,0,0,0.6);
+        box-shadow: 6px 0 24px rgba(0,0,0,0.7);
       }
-      #sidebar.open {
-        transform: translateX(0);
-      }
+      #sidebar.open { transform: translateX(0); }
     }
 
-    #drawer-backdrop {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.6);
-      z-index: 99;
-      backdrop-filter: blur(2px);
-    }
-    #drawer-backdrop.active { display: block; }
-
-    .sidebar-header {
-      padding: 16px;
-      border-bottom: 1px solid var(--border-subtle);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    .logo-area { display: flex; align-items: center; gap: 10px; }
-    .logo-badge {
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, #0284c7, #38bdf8);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
-    }
-    .logo-title { font-size: 16px; font-weight: 700; letter-spacing: -0.02em; }
-    .logo-subtitle { font-size: 11px; color: var(--text-muted); }
-
-    .sidebar-scroll {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-    }
-
-    .section-title {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-muted);
-      font-weight: 700;
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    /* Upload Box */
-    .upload-dropzone {
-      border: 2px dashed var(--border-subtle);
-      border-radius: 10px;
-      padding: 16px;
-      text-align: center;
-      cursor: pointer;
-      background: var(--bg-base);
-      transition: all 0.2s ease;
-    }
-    .upload-dropzone:hover, .upload-dropzone.dragover {
-      border-color: var(--accent-primary);
-      background: rgba(56, 189, 248, 0.05);
-    }
-    .upload-icon { font-size: 24px; margin-bottom: 6px; }
-    .upload-text { font-size: 13px; font-weight: 600; }
-    .upload-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-
-    /* Sources List */
-    .sources-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-height: 220px;
-      overflow-y: auto;
-    }
-    .source-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 12px;
-      background: var(--bg-card);
-      border-radius: 8px;
-      border: 1px solid var(--border-subtle);
-      font-size: 12px;
-    }
-    .source-info { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; padding-right: 8px; }
-    .source-meta { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
-    .delete-source-btn {
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      cursor: pointer;
-      padding: 4px;
-      border-radius: 4px;
-      font-size: 14px;
-    }
-    .delete-source-btn:hover { color: var(--accent-danger); }
-
-    /* Select & Input Controls */
-    .select-control {
-      width: 100%;
-      background: var(--bg-card);
-      color: var(--text-main);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 8px 12px;
-      font-size: 13px;
-      font-family: inherit;
-      outline: none;
-    }
-    .select-control:focus { border-color: var(--border-focus); }
-
-    /* Main Chat Feed Area */
+    /* ========================================================
+       MAIN PANEL STYLING
+       ======================================================== */
     #main-panel {
       flex: 1;
       display: flex;
@@ -421,151 +800,328 @@ HTML_PAGE = """<!doctype html>
       height: 100vh;
       overflow: hidden;
       position: relative;
+      background: var(--bg-base);
     }
 
-    /* Top Navigation Bar */
-    .top-navbar {
-      height: 54px;
-      background: var(--bg-surface);
-      border-bottom: 1px solid var(--border-subtle);
+    /* Top Action Bar */
+    .top-header-bar {
+      height: 52px;
+      min-height: 52px;
+      background: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border-color);
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 0 16px;
       z-index: 10;
     }
-    .nav-left { display: flex; align-items: center; gap: 12px; }
-    .icon-btn {
-      background: transparent;
-      border: 1px solid var(--border-subtle);
-      color: var(--text-main);
-      width: 36px;
-      height: 36px;
-      border-radius: 8px;
+
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-logo-icon {
+      width: 28px;
+      height: 28px;
       display: flex;
       align-items: center;
       justify-content: center;
-      cursor: pointer;
-      font-size: 16px;
-      transition: background 0.2s;
+      font-size: 18px;
     }
-    .icon-btn:hover { background: var(--bg-card); }
-    .status-pill {
-      font-size: 12px;
+    .brand-title {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #ffffff;
+    }
+    .badge-ver {
+      font-size: 9px;
       font-weight: 600;
-      padding: 4px 10px;
+      color: var(--text-muted);
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+
+    /* Status Pill */
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      background: var(--bg-base);
+      border: 1px solid var(--border-color);
       border-radius: 20px;
-      background: rgba(63, 185, 80, 0.15);
-      color: var(--accent-success);
+      padding: 4px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent-success);
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.7);
+    }
+    .status-dot.warning {
+      background: var(--accent-warning);
+      box-shadow: 0 0 8px rgba(245, 158, 11, 0.7);
+    }
+    .status-dot.danger {
+      background: var(--accent-danger);
+      box-shadow: 0 0 8px rgba(239, 68, 68, 0.7);
+    }
+
+    /* Header Action Buttons */
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-nav-action {
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 5px 12px;
+      height: 30px;
+      cursor: pointer;
       display: flex;
       align-items: center;
       gap: 6px;
+      transition: background 0.15s, border-color 0.15s;
     }
-    .status-pill.warning {
-      background: rgba(210, 153, 34, 0.15);
-      color: var(--accent-warning);
+    .btn-nav-action:hover {
+      background: var(--chip-hover);
+      border-color: var(--accent-primary);
     }
-    .status-pill::before {
-      content: "";
-      display: inline-block;
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: currentColor;
+    .btn-clear-chat {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+    }
+    .btn-clear-chat:hover {
+      background: var(--chip-bg);
+      color: var(--text-primary);
     }
 
-    /* Chat Messages Viewport */
-    #messages-container {
+    .hamburger-btn {
+      display: none;
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-primary);
+      width: 32px;
+      height: 32px;
+      cursor: pointer;
+      font-size: 15px;
+      align-items: center;
+      justify-content: center;
+    }
+    @media (max-width: 768px) {
+      .hamburger-btn { display: flex; }
+      .brand-title { display: none; }
+      .badge-ver { display: none; }
+    }
+
+    /* ========================================================
+       CHAT VIEWPORT & WELCOME HERO
+       ======================================================== */
+    #chat-viewport {
       flex: 1;
       overflow-y: auto;
       padding: 16px 20px 24px;
       display: flex;
       flex-direction: column;
-      gap: 18px;
+      gap: 16px;
       scroll-behavior: smooth;
     }
 
-    .message-card {
+    /* Welcome Hero Banner (Exact 2x2 Feature Highlights Grid) */
+    .hero-container {
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 24px 28px;
+      max-width: 900px;
+      width: 100%;
+      margin: 20px auto;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+      animation: fadeIn 0.3s ease;
+    }
+
+    .hero-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #818cf8;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .hero-subtitle {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 6px;
+      line-height: 1.5;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 20px;
+    }
+    @media (max-width: 680px) {
+      .hero-grid { grid-template-columns: 1fr; }
+      .hero-container { padding: 18px; margin: 10px auto; }
+    }
+
+    .feature-card {
+      background: var(--bg-card-ai);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 14px 16px;
+      transition: border-color 0.15s;
+    }
+    .feature-card:hover { border-color: var(--accent-primary); }
+
+    .feature-card-header {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .feature-card-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+    /* Chat Messages */
+    .message-row {
       display: flex;
       gap: 12px;
-      max-width: 880px;
+      max-width: 900px;
       width: 100%;
       margin: 0 auto;
-      animation: fadeIn 0.25s ease;
+      animation: fadeIn 0.2s ease;
     }
     @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(6px); }
+      from { opacity: 0; transform: translateY(4px); }
       to { opacity: 1; transform: translateY(0); }
     }
 
     .msg-avatar {
       width: 32px;
       height: 32px;
-      border-radius: 50%;
+      border-radius: 8px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 15px;
+      font-size: 16px;
       flex-shrink: 0;
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
+      background: var(--bg-card-ai);
+      border: 1px solid var(--border-color);
     }
     .msg-avatar.ai {
-      background: linear-gradient(135deg, #0284c7, #38bdf8);
-      color: #fff;
+      background: linear-gradient(135deg, var(--accent-hover), var(--accent-primary));
+      color: #ffffff;
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
     }
 
-    .msg-content-wrapper {
+    .msg-body-wrapper {
       flex: 1;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
       min-width: 0;
     }
-    .msg-author {
-      font-size: 12px;
+    .msg-meta-row {
+      font-size: 11px;
       font-weight: 700;
       color: var(--text-muted);
       display: flex;
       align-items: center;
       gap: 8px;
     }
+
     .msg-bubble {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
+      background: var(--bg-card-ai);
+      border: 1px solid var(--border-color);
       border-radius: 12px;
       padding: 14px 16px;
-      font-size: 14px;
+      font-size: 13.5px;
       line-height: 1.6;
       word-wrap: break-word;
+      color: var(--text-primary);
     }
-    .message-card.user .msg-bubble {
-      background: #1f3044;
-      border-color: #2b4562;
+    .message-row.user .msg-bubble {
+      background: var(--bg-card-user);
+      border-color: var(--border-color);
     }
 
-    /* Citations List */
-    .citations-box {
-      margin-top: 8px;
+    /* Markdown styling */
+    .msg-bubble p { margin-bottom: 8px; }
+    .msg-bubble p:last-child { margin-bottom: 0; }
+    .msg-bubble code {
+      background: var(--bg-code);
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #79c0ff;
+    }
+    .msg-bubble pre {
+      background: var(--bg-code);
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 8px 0;
+      border: 1px solid var(--border-color);
+    }
+    .msg-bubble pre code { background: transparent; padding: 0; }
+
+    /* Citations Tag Box */
+    .citations-container {
+      margin-top: 10px;
       padding: 8px 12px;
       border-radius: 8px;
-      background: rgba(0,0,0,0.25);
+      background: rgba(0,0,0,0.2);
       border-left: 3px solid var(--accent-primary);
-      font-size: 12px;
-    }
-    .citations-title { font-weight: 700; color: var(--accent-primary); margin-bottom: 4px; font-size: 11px; }
-    .citations-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-    .citation-tag {
-      padding: 2px 8px;
-      border-radius: 4px;
-      background: var(--bg-surface);
-      color: var(--text-muted);
       font-size: 11px;
-      border: 1px solid var(--border-subtle);
     }
+    .citations-title {
+      font-weight: 700;
+      color: var(--accent-primary);
+      margin-bottom: 4px;
+      font-size: 11px;
+    }
+    .citation-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .citation-chip {
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      color: var(--text-secondary);
+      font-size: 10.5px;
+      text-decoration: none;
+    }
+    .citation-chip:hover { border-color: var(--accent-primary); }
 
     /* Message Action Buttons */
-    .msg-actions {
+    .msg-actions-row {
       display: flex;
       gap: 8px;
       margin-top: 4px;
@@ -575,101 +1131,154 @@ HTML_PAGE = """<!doctype html>
       border: none;
       color: var(--text-muted);
       cursor: pointer;
-      font-size: 12px;
+      font-size: 11px;
       display: flex;
       align-items: center;
       gap: 4px;
-      padding: 2px 6px;
+      padding: 3px 8px;
       border-radius: 4px;
+      transition: background 0.15s, color 0.15s;
     }
-    .msg-action-btn:hover {
-      background: var(--bg-card);
-      color: var(--text-main);
-    }
+    .msg-action-btn:hover { background: var(--chip-bg); color: var(--text-primary); }
 
-    /* Markdown Elements Styling */
-    .msg-bubble p { margin-bottom: 8px; }
-    .msg-bubble p:last-child { margin-bottom: 0; }
-    .msg-bubble code {
-      background: #11161d;
-      padding: 2px 5px;
-      border-radius: 4px;
-      font-family: monospace;
-      font-size: 12px;
-      color: #79c0ff;
-    }
-    .msg-bubble pre {
-      background: #11161d;
-      padding: 12px;
-      border-radius: 8px;
-      overflow-x: auto;
-      margin: 8px 0;
-      border: 1px solid var(--border-subtle);
-    }
-    .msg-bubble pre code { background: transparent; padding: 0; }
-
-    /* Quick Chips Carousel */
-    .chips-bar {
-      max-width: 880px;
+    /* ========================================================
+       PROMPT CHIPS & BOTTOM INPUT SECTION
+       ======================================================== */
+    .bottom-interactive-section {
+      padding: 0 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-width: 940px;
       width: 100%;
       margin: 0 auto;
-      padding: 0 16px;
+    }
+    @media (max-width: 768px) {
+      .bottom-interactive-section { padding: 0 10px 10px; }
+    }
+
+    /* Chips Bar */
+    .chips-carousel {
       display: flex;
       gap: 8px;
       overflow-x: auto;
       scrollbar-width: none;
-      -ms-overflow-style: none;
-      padding-bottom: 6px;
+      padding-bottom: 4px;
     }
-    .chips-bar::-webkit-scrollbar { display: none; }
-    .chip-btn {
+    .chips-carousel::-webkit-scrollbar { display: none; }
+
+    .prompt-chip-btn {
       white-space: nowrap;
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      color: var(--text-main);
-      padding: 6px 12px;
+      background: var(--chip-bg);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 6px 14px;
       border-radius: 18px;
-      font-size: 12px;
+      font-size: 11.5px;
+      font-weight: 500;
       cursor: pointer;
       display: flex;
       align-items: center;
       gap: 6px;
-      transition: all 0.15s ease;
+      transition: background 0.15s, border-color 0.15s;
       flex-shrink: 0;
     }
-    .chip-btn:hover {
-      background: var(--bg-card);
+    .prompt-chip-btn:hover {
+      background: var(--chip-hover);
       border-color: var(--accent-primary);
     }
 
-    /* Bottom Sticky Input Container */
-    .input-wrapper {
-      background: var(--bg-surface);
-      border-top: 1px solid var(--border-subtle);
-      padding: 12px 16px 16px;
-    }
-    .input-box {
-      max-width: 880px;
+    /* Progress Bar */
+    .generation-progress-bar {
+      height: 3px;
       width: 100%;
-      margin: 0 auto;
-      background: var(--bg-input);
-      border: 1px solid var(--border-subtle);
-      border-radius: 16px;
+      background: transparent;
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+    .generation-progress-bar.active::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 40%;
+      background: var(--accent-primary);
+      border-radius: 2px;
+      animation: indeterminate 1.4s infinite ease-in-out;
+    }
+    @keyframes indeterminate {
+      0% { left: -40%; width: 40%; }
+      50% { left: 40%; width: 60%; }
+      100% { left: 100%; width: 40%; }
+    }
+
+    /* Attached Image Preview Bar */
+    .image-preview-banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--chip-bg);
+      border: 1px solid var(--accent-primary);
+      border-radius: 8px;
       padding: 6px 12px;
+    }
+    .preview-info {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .btn-remove-photo {
+      background: transparent;
+      border: none;
+      color: var(--accent-danger);
+      font-size: 11px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    /* Elevated Input Card */
+    .input-card-box {
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
       gap: 8px;
       transition: border-color 0.2s;
     }
-    .input-box:focus-within { border-color: var(--border-focus); }
+    .input-card-box:focus-within { border-color: var(--accent-primary); }
 
-    .input-textarea {
+    .btn-input-attach {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 20px;
+      font-weight: 700;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-input-attach:hover { background: var(--chip-hover); color: var(--text-primary); }
+
+    .query-textarea {
       flex: 1;
       background: transparent;
       border: none;
-      color: var(--text-main);
+      color: var(--text-primary);
       font-family: inherit;
-      font-size: 14px;
+      font-size: 13.5px;
       resize: none;
       max-height: 120px;
       min-height: 24px;
@@ -677,433 +1286,774 @@ HTML_PAGE = """<!doctype html>
       outline: none;
       line-height: 1.4;
     }
+    .query-textarea::placeholder { color: var(--text-muted); }
 
-    .mic-btn {
+    .btn-mic-stt {
       width: 36px;
       height: 36px;
-      border-radius: 50%;
+      border-radius: 8px;
       background: transparent;
       border: none;
-      color: var(--text-muted);
+      color: var(--text-secondary);
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 16px;
-      transition: all 0.2s;
+      transition: background 0.15s, color 0.15s;
       flex-shrink: 0;
     }
-    .mic-btn:hover { color: var(--text-main); background: var(--bg-card); }
-    .mic-btn.listening {
+    .btn-mic-stt:hover { background: var(--chip-hover); color: var(--text-primary); }
+    .btn-mic-stt.recording {
       background: var(--accent-danger);
-      color: white;
-      animation: pulse 1.5s infinite;
+      color: #ffffff;
+      animation: pulseMic 1.4s infinite;
     }
-    @keyframes pulse {
-      0% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.15); opacity: 0.85; }
-      100% { transform: scale(1); opacity: 1; }
+    @keyframes pulseMic {
+      0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      70% { transform: scale(1.08); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+      100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
     }
 
-    .send-btn {
-      width: 36px;
-      height: 36px;
-      border-radius: 10px;
+    .btn-search-primary {
+      height: 38px;
+      padding: 0 18px;
+      border-radius: 8px;
       background: var(--accent-primary);
-      color: #0d1117;
+      color: #ffffff;
       border: none;
       display: flex;
       align-items: center;
-      justify-content: center;
+      gap: 6px;
       cursor: pointer;
       font-weight: 700;
-      font-size: 16px;
-      transition: background 0.2s;
+      font-size: 13px;
+      transition: background 0.15s;
       flex-shrink: 0;
     }
-    .send-btn:hover { background: var(--accent-hover); }
-    .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-    /* Install Banner */
-    #install-banner {
-      display: none;
-      background: linear-gradient(90deg, #1f2937, #111827);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 10px 14px;
-      margin-bottom: 12px;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-    .install-text { font-size: 12px; font-weight: 600; }
-    .install-action {
-      background: var(--accent-primary);
-      color: #0d1117;
-      border: none;
-      border-radius: 6px;
-      padding: 5px 10px;
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
+    .btn-search-primary:hover { background: var(--accent-hover); }
+    .btn-search-primary.btn-stop {
+      background: var(--accent-danger);
     }
 
-    /* Modal */
-    .modal-backdrop {
+    /* ========================================================
+       MODAL STYLING (Stats, History, Export, Image Viewer)
+       ======================================================== */
+    .modal-overlay {
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(0,0,0,0.7);
-      z-index: 200;
+      background: rgba(0,0,0,0.75);
+      z-index: 300;
       backdrop-filter: blur(4px);
       align-items: center;
       justify-content: center;
       padding: 20px;
     }
-    .modal-backdrop.open { display: flex; }
-    .modal-box {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-subtle);
-      border-radius: 14px;
+    .modal-overlay.open { display: flex; }
+
+    .modal-window {
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
       width: 100%;
-      max-width: 480px;
+      max-width: 520px;
       max-height: 85vh;
       overflow-y: auto;
       padding: 20px;
-      box-shadow: 0 12px 32px rgba(0,0,0,0.6);
+      box-shadow: 0 16px 40px rgba(0,0,0,0.7);
+      animation: fadeIn 0.2s ease;
     }
-    .modal-header {
+
+    .modal-header-row {
       display: flex;
-      align-items: center;
       justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 10px;
+    }
+    .modal-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .modal-close-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 16px;
+      padding: 4px;
+    }
+    .modal-close-btn:hover { color: var(--text-primary); }
+
+    .stats-metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
       margin-bottom: 16px;
     }
+    .stat-metric-card {
+      background: var(--bg-base);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+    }
+    .stat-number {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--accent-primary);
+    }
+    .stat-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .session-list-box {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .session-item-card {
+      background: var(--bg-base);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .session-item-card:hover { border-color: var(--accent-primary); }
+    .session-title-text { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+    .session-date-sub { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
   </style>
 </head>
 <body>
 
-  <!-- App Shell -->
+  <!-- App Main Shell -->
   <div id="app-container">
-    <!-- Dim Backdrop for Mobile Drawer -->
-    <div id="drawer-backdrop" onclick="toggleSidebar(false)"></div>
+    <!-- Mobile Drawer Backdrop -->
+    <div id="drawer-backdrop" onclick="toggleSidebarDrawer(false)"></div>
 
-    <!-- Sidebar -->
+    <!-- 1. LEFT SIDEBAR -->
     <aside id="sidebar">
-      <div class="sidebar-header">
-        <div class="logo-area">
-          <div class="logo-badge">🔍</div>
-          <div>
-            <div class="logo-title">AI Search Studio</div>
-            <div class="logo-subtitle">Universal Hybrid Assistant</div>
-          </div>
-        </div>
-        <button class="icon-btn" onclick="toggleSidebar(false)" style="display: none;" id="sidebar-close-btn">✕</button>
-      </div>
-
-      <div class="sidebar-scroll">
-        <!-- PWA Install Card if available -->
-        <div id="install-banner">
-          <div>
-            <div class="install-text">📲 Install App</div>
-            <div style="font-size: 10px; color: var(--text-muted);">Use full screen without browser bars</div>
-          </div>
-          <button class="install-action" id="pwa-install-btn">Install</button>
+      <div class="sidebar-inner">
+        <!-- Upload Files & Analytics Stats Buttons -->
+        <div class="sidebar-btn-row">
+          <button class="btn-upload" onclick="triggerFileInput()" title="Upload PDF, Word, CSV, Code, Images">
+            <span>📂</span> Upload Files
+          </button>
+          <button class="btn-stats" onclick="openStatsModal()" title="Knowledge Base Analytics">
+            📊
+          </button>
         </div>
 
-        <!-- Mode Selector -->
-        <div>
-          <div class="section-title">Search Mode</div>
-          <select id="mode-select" class="select-control" onchange="onModeChange()">
-            <option value="Auto (Hybrid)">🔄 Auto (Hybrid Search)</option>
-            <option value="Docs Only">📄 Knowledge Docs Only</option>
-            <option value="Web Only">🌐 Live Web Search Only</option>
+        <!-- Uploaded Files Section Header -->
+        <div class="section-header-row">
+          <span class="section-title">UPLOADED FILES & DOCS</span>
+          <span class="section-count-badge" id="sidebar-file-count">0 files</span>
+        </div>
+
+        <!-- Scrollable Active Sources List -->
+        <div class="sources-scroll-box" id="sources-container">
+          <div class="sources-empty">No documents loaded.<br>Click 'Upload Files' to add PDF, Word, CSV, Images...</div>
+        </div>
+
+        <!-- Search Mode Selector -->
+        <div class="control-group">
+          <label class="control-label" for="select-search-mode">Search Mode</label>
+          <select id="select-search-mode" class="select-menu" onchange="onModeChanged()">
+            <option value="Auto (Hybrid)">Auto (Hybrid)</option>
+            <option value="Docs Only">Docs Only</option>
+            <option value="Web Only">Web Only</option>
           </select>
         </div>
 
-        <!-- Model Selector -->
-        <div>
-          <div class="section-title">AI Model</div>
-          <select id="model-select" class="select-control" onchange="onModelChange()">
-            <option value="open-mistral-7b">Mistral 7B (Fast)</option>
-            <option value="mistral-small-latest">Mistral Small</option>
-            <option value="mistral-medium-latest">Mistral Medium</option>
-            <option value="mistral-large-latest">Mistral Large (Smartest)</option>
-            <option value="codestral-latest">Codestral (Code)</option>
+        <!-- AI Model Selector -->
+        <div class="control-group">
+          <label class="control-label" for="select-ai-model">AI Model</label>
+          <select id="select-ai-model" class="select-menu" onchange="onModelChanged()">
+            <option value="open-mistral-7b">open-mistral-7b</option>
+            <option value="mistral-small-latest">mistral-small-latest</option>
+            <option value="mistral-medium-latest">mistral-medium-latest</option>
+            <option value="mistral-large-latest">mistral-large-latest</option>
+            <option value="codestral-latest">codestral-latest</option>
           </select>
         </div>
 
-        <!-- Upload Zone -->
-        <div>
-          <div class="section-title">Knowledge Base</div>
-          <input type="file" id="file-input" multiple style="display: none;" onchange="handleFileSelect(event)" accept=".pdf,.docx,.csv,.xlsx,.txt,.md,.py,.js,.json,.png,.jpg">
-          <div class="upload-dropzone" onclick="document.getElementById('file-input').click()" id="dropzone">
-            <div class="upload-icon">📥</div>
-            <div class="upload-text">Upload Documents</div>
-            <div class="upload-sub">PDF, Word, CSV, TXT, Code, Images</div>
+        <!-- Retrieval Depth Slider -->
+        <div class="control-group">
+          <div class="control-header-row">
+            <span class="control-label">Retrieval Depth</span>
+            <span class="depth-val-indicator" id="depth-val-text">4</span>
           </div>
+          <input type="range" id="slider-depth" class="range-slider" min="1" max="10" value="4" oninput="onDepthChanged(this.value)">
         </div>
 
-        <!-- Indexed Documents -->
-        <div>
-          <div class="section-title">
-            <span>Indexed Files</span>
-            <button class="delete-source-btn" onclick="clearAllDocs()" title="Clear All Files">🧹 Clear</button>
+        <!-- Auto-Read Aloud (TTS) Switch -->
+        <div class="switch-container" onclick="toggleAutoTts()">
+          <div class="switch-track" id="auto-tts-track">
+            <div class="switch-thumb"></div>
           </div>
-          <div id="sources-list" class="sources-list">
-            <div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 12px 0;">No documents uploaded yet.</div>
-          </div>
+          <span class="switch-label">Auto-Read Aloud (TTS)</span>
+        </div>
+
+        <!-- Interface Theme Selector -->
+        <div class="control-group">
+          <label class="control-label" for="select-theme">Interface Theme</label>
+          <select id="select-theme" class="select-menu" onchange="onThemeChanged(this.value)">
+            <option value="Developer Dark">Developer Dark</option>
+            <option value="Obsidian Slate">Obsidian Slate</option>
+            <option value="Nordic Dark">Nordic Dark</option>
+            <option value="Developer Light">Developer Light</option>
+          </select>
         </div>
       </div>
     </aside>
 
-    <!-- Main Chat Workspace -->
+    <!-- 2. MAIN WORKSPACE PANEL -->
     <main id="main-panel">
-      <!-- Top Navbar -->
-      <header class="top-navbar">
-        <div class="nav-left">
-          <button class="icon-btn" id="mobile-menu-btn" onclick="toggleSidebar(true)" title="Menu">☰</button>
-          <div class="status-pill" id="status-pill">Ready</div>
+      <!-- Top Action Bar -->
+      <header class="top-header-bar">
+        <div class="header-brand">
+          <button class="hamburger-btn" onclick="toggleSidebarDrawer(true)" title="Menu">☰</button>
+          <div class="brand-logo-icon">🧠</div>
+          <span class="brand-title">Search Studio</span>
+          <span class="badge-ver">v2.0</span>
         </div>
-        <div style="display: flex; gap: 8px;">
-          <button class="icon-btn" onclick="clearChat()" title="Clear Chat">🧹</button>
-          <button class="icon-btn" onclick="toggleSidebar(true)" title="Knowledge Base & Settings">⚙️</button>
+
+        <!-- Center Status Pill -->
+        <div class="status-pill" id="header-status-pill">
+          <div class="status-dot" id="status-dot"></div>
+          <span id="status-pill-text">Ready (0 Chunks)</span>
+        </div>
+
+        <!-- Right Quick Action Buttons -->
+        <div class="header-actions">
+          <button class="btn-nav-action btn-clear-chat" onclick="clearCurrentChat()" title="Clear Chat">
+            🧹 Clear Chat
+          </button>
+          <button class="btn-nav-action" onclick="openHistoryModal()" title="View Chat History">
+            🕒 History
+          </button>
+          <button class="btn-nav-action" onclick="openExportModal()" title="Export Chat">
+            💾 Export Chat
+          </button>
         </div>
       </header>
 
-      <!-- Messages View -->
-      <section id="messages-container">
-        <div class="message-card ai">
-          <div class="msg-avatar ai">⚡</div>
-          <div class="msg-content-wrapper">
-            <div class="msg-author">AI Search Studio</div>
-            <div class="msg-bubble">
-              👋 Welcome! I am your <strong>Universal Search & Knowledge Assistant</strong>.<br><br>
-              • 📂 <strong>Upload documents</strong> (PDF, Word, Code, Data) in the menu to search private knowledge.<br>
-              • 🌐 <strong>Live DuckDuckGo search</strong> automatically kicks in for up-to-date web queries.<br>
-              • 🎙️ Tap the <strong>Microphone</strong> to ask by voice on both laptop and mobile phone.<br>
-              • 📲 Tap <strong>Install App</strong> in settings to install this on your home screen!
+      <!-- Scrollable Message Feed -->
+      <section id="chat-viewport">
+        <!-- Welcome Hero View (Rendered when no chat messages) -->
+        <div class="hero-container" id="hero-welcome-card">
+          <div class="hero-title">✨ Welcome to Search Studio</div>
+          <div class="hero-subtitle">
+            Your multi-modal RAG knowledge engine. Ask questions from your PDFs, Word documents,<br>code, spreadsheets, or query live web intelligence with voice & image support.
+          </div>
+
+          <!-- 2x2 Feature Highlights Grid -->
+          <div class="hero-grid">
+            <div class="feature-card">
+              <div class="feature-card-header">📄 Multi-Format Uploads</div>
+              <div class="feature-card-desc">PDF, Word (DOCX), CSV, Excel, TXT, Code & OCR</div>
+            </div>
+            <div class="feature-card">
+              <div class="feature-card-header">⚡ Real-Time Streaming</div>
+              <div class="feature-card-desc">Instant token generation powered by Mistral AI</div>
+            </div>
+            <div class="feature-card">
+              <div class="feature-card-header">🎙️ Two-Way Voice</div>
+              <div class="feature-card-desc">Speech-to-text input and natural voice read-aloud</div>
+            </div>
+            <div class="feature-card">
+              <div class="feature-card-header">🌐 Live Web & Images</div>
+              <div class="feature-card-desc">Automatic search fallbacks and inline image discovery</div>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- Quick Chips Bar -->
-      <div class="chips-bar">
-        <button class="chip-btn" onclick="sendQuickPrompt('Summarize the uploaded documents with key takeaways and bullet points.')">📝 Summarize Docs</button>
-        <button class="chip-btn" onclick="sendQuickPrompt('Create 5 practice quiz questions based on the uploaded knowledge base.')">🎯 Practice Quiz</button>
-        <button class="chip-btn" onclick="sendQuickPrompt('What are the key insights and actionable highlights in these documents?')">💡 Key Insights</button>
-        <button class="chip-btn" onclick="setModeAndNotify('Web Only')">🌐 Web Mode</button>
-        <button class="chip-btn" onclick="setModeAndNotify('Docs Only')">📄 Docs Mode</button>
-        <button class="chip-btn" onclick="setModeAndNotify('Auto (Hybrid)')">🔄 Auto Mode</button>
-      </div>
-
-      <!-- Bottom Chat Input -->
-      <div class="input-wrapper">
-        <div class="input-box">
-          <button class="icon-btn" style="border:none; width:32px; height:32px; margin-bottom: 2px;" onclick="document.getElementById('file-input').click()" title="Attach Document">📎</button>
-          <textarea id="user-input" class="input-textarea" placeholder="Ask anything about your documents or search the web..." rows="1" onkeydown="handleKeyDown(event)" oninput="autoGrow(this)"></textarea>
-          <button id="mic-btn" class="mic-btn" onclick="toggleSpeechRecognition()" title="Voice Input">🎙️</button>
-          <button id="send-btn" class="send-btn" onclick="sendMessage()" title="Send">➤</button>
+      <!-- Bottom Interactive Section -->
+      <footer class="bottom-interactive-section">
+        <!-- Prompt Suggestion Chips -->
+        <div class="chips-carousel">
+          <button class="prompt-chip-btn" onclick="sendQuickPrompt('Summarize the uploaded documents with key takeaways and bullet points.')">📝 Summarize Docs</button>
+          <button class="prompt-chip-btn" onclick="sendQuickPrompt('Create 5 practice quiz questions based on the uploaded knowledge base.')">🎯 Practice Quiz</button>
+          <button class="prompt-chip-btn" onclick="sendQuickPrompt('What are the key insights and actionable highlights in these documents?')">💡 Key Insights</button>
+          <button class="prompt-chip-btn" onclick="setQuickMode('Web Only')">🌐 Web Mode</button>
+          <button class="prompt-chip-btn" onclick="setQuickMode('Docs Only')">📄 Docs Mode</button>
+          <button class="prompt-chip-btn" onclick="setQuickMode('Auto (Hybrid)')">🔄 Auto Mode</button>
         </div>
-      </div>
+
+        <!-- Generation Progress Bar -->
+        <div class="generation-progress-bar" id="progress-indicator"></div>
+
+        <!-- Attached Image Preview Bar -->
+        <div class="image-preview-banner" id="photo-preview-bar">
+          <div class="preview-info">
+            <span>🖼️</span>
+            <span id="photo-preview-name">image.png</span>
+          </div>
+          <button class="btn-remove-photo" onclick="removeAttachedPhoto()">✕ Remove Photo</button>
+        </div>
+
+        <!-- Elevated Input Box -->
+        <div class="input-card-box">
+          <button class="btn-input-attach" onclick="triggerAttachDialog()" title="Attach File or Image">+</button>
+          <textarea id="main-query-input" class="query-textarea" rows="1" placeholder="Ask any question about your documents, code, or search the web..." onkeydown="handleInputKeyDown(event)" oninput="autoGrowInput(this)"></textarea>
+          <button class="btn-mic-stt" id="mic-toggle-btn" onclick="toggleVoiceSTT()" title="Voice Dictation">🎙️</button>
+          <button class="btn-search-primary" id="btn-submit-search" onclick="handleSubmitOrStop()">
+            <span id="search-icon-symbol">🔍</span> <span id="search-btn-label">Search</span>
+          </button>
+        </div>
+      </footer>
     </main>
   </div>
 
+  <!-- Hidden File Pickers -->
+  <input type="file" id="general-file-input" multiple style="display: none;" onchange="handleFileUpload(event)">
+  <input type="file" id="image-file-input" accept="image/*" style="display: none;" onchange="handleImageAttachment(event)">
+
+  <!-- MODALS -->
+  <!-- 1. Knowledge Base Analytics Modal -->
+  <div class="modal-overlay" id="stats-modal" onclick="closeModalOnBackdrop(event, 'stats-modal')">
+    <div class="modal-window">
+      <div class="modal-header-row">
+        <div class="modal-title">📊 Knowledge Base Analytics</div>
+        <button class="modal-close-btn" onclick="closeModal('stats-modal')">✕</button>
+      </div>
+      <div class="stats-metric-grid">
+        <div class="stat-metric-card">
+          <div class="stat-number" id="stats-total-files">0</div>
+          <div class="stat-title">Indexed Documents</div>
+        </div>
+        <div class="stat-metric-card">
+          <div class="stat-number" id="stats-total-chunks">0</div>
+          <div class="stat-title">Vector Chunks</div>
+        </div>
+        <div class="stat-metric-card">
+          <div class="stat-number" id="stats-total-size">0 KB</div>
+          <div class="stat-title">Storage Footprint</div>
+        </div>
+        <div class="stat-metric-card">
+          <div class="stat-number" style="font-size: 16px; margin-top: 5px;" id="stats-db-status">Active</div>
+          <div class="stat-title">ChromaDB Engine</div>
+        </div>
+      </div>
+      <button class="btn-upload" style="background: var(--accent-danger); width: 100%;" onclick="clearAllDocuments()">
+        🧹 Clear Entire Knowledge Base
+      </button>
+    </div>
+  </div>
+
+  <!-- 2. Chat History Modal -->
+  <div class="modal-overlay" id="history-modal" onclick="closeModalOnBackdrop(event, 'history-modal')">
+    <div class="modal-window">
+      <div class="modal-header-row">
+        <div class="modal-title">🕒 Conversation History</div>
+        <button class="modal-close-btn" onclick="closeModal('history-modal')">✕</button>
+      </div>
+      <button class="btn-upload" style="width: 100%; margin-bottom: 12px;" onclick="createNewSession()">
+        ➕ New Conversation
+      </button>
+      <div class="session-list-box" id="session-items-list">
+        <div style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 20px 0;">Loading history...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Export Chat Modal -->
+  <div class="modal-overlay" id="export-modal" onclick="closeModalOnBackdrop(event, 'export-modal')">
+    <div class="modal-window">
+      <div class="modal-header-row">
+        <div class="modal-title">💾 Export Conversation</div>
+        <button class="modal-close-btn" onclick="closeModal('export-modal')">✕</button>
+      </div>
+      <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 16px;">
+        Download the active conversation with full citations and formatting:
+      </p>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <button class="btn-nav-action" style="height: 38px; justify-content: center;" onclick="downloadExport('markdown')">
+          📄 Download as Markdown (.md)
+        </button>
+        <button class="btn-nav-action" style="height: 38px; justify-content: center;" onclick="downloadExport('json')">
+          🗂️ Download as JSON (.json)
+        </button>
+        <button class="btn-nav-action" style="height: 38px; justify-content: center;" onclick="downloadExport('txt')">
+          📝 Download as Plain Text (.txt)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Image Viewer Modal -->
+  <div class="modal-overlay" id="image-modal" onclick="closeModalOnBackdrop(event, 'image-modal')">
+    <div class="modal-window" style="max-width: 680px; text-align: center;">
+      <div class="modal-header-row">
+        <div class="modal-title">🖼️ Image Preview</div>
+        <button class="modal-close-btn" onclick="closeModal('image-modal')">✕</button>
+      </div>
+      <img id="modal-preview-img" src="" style="max-width: 100%; max-height: 55vh; border-radius: 8px; border: 1px solid var(--border-color); object-fit: contain;">
+      <div style="margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn-nav-action" id="modal-img-save-btn" onclick="saveActiveImage()">💾 Save Image</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================
+       CORE CLIENT CONTROLLER JAVASCRIPT
+       ======================================================== -->
   <script>
     // State
-    let isGenerating = false;
-    let deferredInstallPrompt = null;
-    let recognition = null;
-    let isListening = false;
+    let currentSessionId = 'session_' + Date.now();
+    let currentMessages = [];
+    let isProcessing = false;
+    let autoTtsEnabled = false;
+    let attachedImageFile = null;
+    let recognitionInstance = null;
+    let isRecordingVoice = false;
+    let activeEventSource = null;
 
     // Elements
     const sidebar = document.getElementById('sidebar');
-    const backdrop = document.getElementById('drawer-backdrop');
-    const messagesContainer = document.getElementById('messages-container');
-    const userInput = document.getElementById('user-input');
-    const sendBtn = document.getElementById('send-btn');
-    const micBtn = document.getElementById('mic-btn');
-    const statusPill = document.getElementById('status-pill');
-    const modeSelect = document.getElementById('mode-select');
-    const modelSelect = document.getElementById('model-select');
-    const sourcesList = document.getElementById('sources-list');
-    const installBanner = document.getElementById('install-banner');
-    const pwaInstallBtn = document.getElementById('pwa-install-btn');
+    const drawerBackdrop = document.getElementById('drawer-backdrop');
+    const chatViewport = document.getElementById('chat-viewport');
+    const queryInput = document.getElementById('main-query-input');
+    const searchBtn = document.getElementById('btn-submit-search');
+    const searchIconSymbol = document.getElementById('search-icon-symbol');
+    const searchBtnLabel = document.getElementById('search-btn-label');
+    const statusDot = document.getElementById('status-dot');
+    const statusPillText = document.getElementById('status-pill-text');
+    const sourcesContainer = document.getElementById('sources-container');
+    const fileCountBadge = document.getElementById('sidebar-file-count');
+    const progressBar = document.getElementById('progress-indicator');
+    const photoBanner = document.getElementById('photo-preview-bar');
+    const photoNameText = document.getElementById('photo-preview-name');
+    const depthValText = document.getElementById('depth-val-text');
+    const depthSlider = document.getElementById('slider-depth');
+    const modeSelect = document.getElementById('select-search-mode');
+    const modelSelect = document.getElementById('select-ai-model');
+    const themeSelect = document.getElementById('select-theme');
+    const heroCard = document.getElementById('hero-welcome-card');
 
-    // Register Service Worker for PWA
+    // Restore saved theme from local storage
+    const savedTheme = localStorage.getItem('search_studio_theme') || 'Developer Dark';
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    if (themeSelect) themeSelect.value = savedTheme;
+
+    // Service Worker Registration for PWA
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js')
-          .then(reg => console.log('PWA Service Worker registered:', reg.scope))
-          .catch(err => console.log('PWA registration failed:', err));
+        navigator.serviceWorker.register('/sw.js').catch(err => console.log('SW notice:', err));
       });
     }
 
-    // Capture PWA Install Prompt
-    window.addEventListener('beforeinstallprompt', (e) => {
-      e.preventDefault();
-      deferredInstallPrompt = e;
-      installBanner.style.display = 'flex';
-    });
-
-    pwaInstallBtn.addEventListener('click', async () => {
-      if (deferredInstallPrompt) {
-        deferredInstallPrompt.prompt();
-        const { outcome } = await deferredInstallPrompt.userChoice;
-        if (outcome === 'accepted') {
-          installBanner.style.display = 'none';
-        }
-        deferredInstallPrompt = null;
-      } else {
-        alert('To install on iOS: Tap the Share button (square with arrow) and select "Add to Home Screen".');
-      }
-    });
-
-    // Mobile Sidebar Drawer
-    function toggleSidebar(open) {
-      if (open) {
-        sidebar.classList.add('open');
-        backdrop.classList.add('active');
-        document.getElementById('sidebar-close-btn').style.display = 'block';
-      } else {
-        sidebar.classList.remove('open');
-        backdrop.classList.remove('active');
-        document.getElementById('sidebar-close-btn').style.display = 'none';
-      }
-    }
-
-    // Auto-grow textarea
-    function autoGrow(el) {
-      el.style.height = 'auto';
-      el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-    }
-
-    function handleKeyDown(event) {
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        sendMessage();
-      }
-    }
-
-    // Update Status Pill
-    function setStatus(text, type = 'success') {
-      statusPill.textContent = text;
-      statusPill.className = 'status-pill' + (type === 'warning' ? ' warning' : '');
-    }
-
-    // Load initial config and documents
-    async function loadAppConfig() {
+    // 1. INITIAL APP CONFIG & DOCUMENTS LOAD
+    async function initApp() {
       try {
         const res = await fetch('/api/config');
         const data = await res.json();
+
+        if (data.current_mode) modeSelect.value = data.current_mode;
+        if (data.current_model) modelSelect.value = data.current_model;
+        if (data.current_depth) {
+          depthSlider.value = data.current_depth;
+          depthValText.textContent = data.current_depth;
+        }
+
         if (data.knowledge_stats) {
-          renderSources(data.knowledge_stats);
+          renderKnowledgeSources(data.knowledge_stats);
         }
-        if (!data.has_api_key) {
-          setStatus('API Key Required', 'warning');
-        }
-      } catch (err) {
-        console.error('Failed to load initial config:', err);
+      } catch (e) {
+        console.error('Config load failed:', e);
+        setStatus("Ready (Offline)", "warning");
       }
     }
-    loadAppConfig();
+    initApp();
 
-    // Render Sources List
-    function renderSources(stats) {
+    // 2. STATUS HELPER
+    function setStatus(text, type = "success") {
+      statusPillText.textContent = text;
+      statusDot.className = "status-dot" + (type === "warning" ? " warning" : type === "danger" ? " danger" : "");
+    }
+
+    // 3. KNOWLEDGE SOURCES RENDERING
+    function getFileIcon(filename) {
+      const ext = filename.split('.').pop().toLowerCase();
+      if (ext === 'pdf') return '📄';
+      if (ext === 'docx') return '📘';
+      if (ext === 'txt' || ext === 'md') return '📝';
+      if (['csv', 'xlsx', 'xls'].includes(ext)) return '📊';
+      if (['java'].includes(ext)) return '☕';
+      if (['py'].includes(ext)) return '🐍';
+      if (['js', 'ts', 'html', 'css', 'json'].includes(ext)) return '📜';
+      if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return '🖼️';
+      return '📄';
+    }
+
+    function renderKnowledgeSources(stats) {
       const sources = stats.sources || [];
-      if (sources.length === 0) {
-        sourcesList.innerHTML = '<div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 12px 0;">No documents uploaded yet.</div>';
+      fileCountBadge.textContent = `${sources.length} files`;
+
+      // Update Top Status Pill
+      if (stats.total_chunks > 0) {
+        setStatus(`Ready (${stats.total_chunks} Chunks)`, "success");
+      } else {
+        setStatus("Ready (0 Chunks)", "warning");
+      }
+
+      // Update Stats Modal Metrics
+      document.getElementById('stats-total-files').textContent = sources.length;
+      document.getElementById('stats-total-chunks').textContent = stats.total_chunks || 0;
+      document.getElementById('stats-total-size').textContent = (stats.total_size_kb || 0) + ' KB';
+
+      if (!sources.length) {
+        sourcesContainer.innerHTML = `<div class="sources-empty">No documents loaded.<br>Click 'Upload Files' to add PDF, Word, CSV, Images...</div>`;
         return;
       }
-      sourcesList.innerHTML = sources.map(s => `
-        <div class="source-item">
-          <div class="source-info">
-            <div style="font-weight:600;">${escapeHtml(s.filename)}</div>
-            <div class="source-meta">${s.chunks} chunks • ${s.size_kb} KB</div>
+
+      sourcesContainer.innerHTML = sources.map(s => `
+        <div class="source-card">
+          <div class="source-left">
+            <span class="source-icon">${getFileIcon(s.filename)}</span>
+            <div style="min-width: 0;">
+              <div class="source-name" title="${escapeHtml(s.filename)}">${escapeHtml(s.filename)}</div>
+              <div class="source-meta">${s.chunks} chunks • ${s.size_kb} KB</div>
+            </div>
           </div>
-          <button class="delete-source-btn" onclick="deleteSource('${escapeHtml(s.filename)}')">✕</button>
+          <button class="source-del-btn" onclick="deleteSource('${escapeHtml(s.filename)}')" title="Delete Source">✕</button>
         </div>
       `).join('');
     }
 
-    async function deleteSource(filename) {
-      if (!confirm(`Delete ${filename}?`)) return;
-      try {
-        const res = await fetch(`/api/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-        if (res.ok) {
-          loadAppConfig();
-        }
-      } catch (err) {
-        alert('Delete failed: ' + err.message);
-      }
+    // 4. FILE UPLOADS
+    function triggerFileInput() {
+      document.getElementById('general-file-input').click();
     }
 
-    async function clearAllDocs() {
-      if (!confirm('Clear all indexed documents?')) return;
-      try {
-        await fetch('/api/documents', { method: 'DELETE' });
-        loadAppConfig();
-      } catch (err) {
-        alert('Clear failed: ' + err.message);
-      }
-    }
-
-    // File Upload Handler
-    async function handleFileSelect(event) {
+    async function handleFileUpload(event) {
       const files = event.target.files;
-      if (!files.length) return;
+      if (!files || !files.length) return;
 
       const formData = new FormData();
       for (const f of files) {
         formData.append('files', f);
       }
 
-      setStatus('Indexing Documents...', 'warning');
+      setStatus("Indexing Documents...", "warning");
+      progressBar.classList.add('active');
+
       try {
-        const res = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData
-        });
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Upload failed');
-        renderSources(data.knowledge_stats);
-        setStatus(`Ready (${data.knowledge_stats.total_chunks} chunks)`, 'success');
-        addMessage('system', `✅ Successfully indexed ${data.files_indexed} file(s) with ${data.chunks_created} chunks into your knowledge base.`);
+        if (!res.ok) throw new Error(data.detail || "Upload error");
+
+        renderKnowledgeSources(data.knowledge_stats);
+        addSystemCard(`✅ Indexed **${data.files_indexed} file(s)** (${data.chunks_created} chunks) into knowledge base.`);
       } catch (err) {
-        setStatus('Upload Failed', 'warning');
-        alert('Upload failed: ' + err.message);
+        alert("Upload error: " + err.message);
+        setStatus("Upload Failed", "danger");
       } finally {
+        progressBar.classList.remove('active');
         event.target.value = '';
       }
     }
 
-    // Drag and Drop Upload Support
-    const dropzone = document.getElementById('dropzone');
-    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
-    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-    dropzone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      dropzone.classList.remove('dragover');
-      if (e.dataTransfer.files.length) {
-        handleFileSelect({ target: { files: e.dataTransfer.files, value: '' } });
+    async function deleteSource(filename) {
+      if (!confirm(`Remove ${filename} from knowledge base?`)) return;
+      try {
+        const res = await fetch(`/api/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.knowledge_stats) renderKnowledgeSources(data.knowledge_stats);
+      } catch (err) {
+        alert("Delete failed: " + err.message);
       }
-    });
+    }
 
-    // Chat Message Handlers
-    function addMessage(role, text, citations = []) {
-      const card = document.createElement('div');
-      card.className = `message-card ${role}`;
+    async function clearAllDocuments() {
+      if (!confirm("Are you sure you want to clear the entire knowledge base?")) return;
+      try {
+        const res = await fetch('/api/documents', { method: 'DELETE' });
+        const data = await res.json();
+        if (data.knowledge_stats) renderKnowledgeSources(data.knowledge_stats);
+        closeModal('stats-modal');
+        addSystemCard("🧹 Entire knowledge base and vectors cleared.");
+      } catch (err) {
+        alert("Failed clearing knowledge base: " + err.message);
+      }
+    }
 
-      const avatar = role === 'ai' ? '⚡' : '👤';
+    // 5. SIDEBAR SETTINGS HANDLERS
+    async function onModeChanged() {
+      const mode = modeSelect.value;
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
+      });
+      addSystemCard(`Search mode switched to: **${mode}**`);
+    }
+
+    async function onModelChanged() {
+      const model = modelSelect.value;
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model })
+      });
+    }
+
+    async function onDepthChanged(val) {
+      depthValText.textContent = val;
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ depth: parseInt(val) })
+      });
+    }
+
+    function toggleAutoTts() {
+      autoTtsEnabled = !autoTtsEnabled;
+      const track = document.getElementById('auto-tts-track');
+      if (autoTtsEnabled) track.classList.add('active');
+      else track.classList.remove('active');
+    }
+
+    function onThemeChanged(themeName) {
+      document.documentElement.setAttribute('data-theme', themeName);
+      localStorage.setItem('search_studio_theme', themeName);
+    }
+
+    function toggleSidebarDrawer(open) {
+      if (open) {
+        sidebar.classList.add('open');
+        drawerBackdrop.classList.add('active');
+      } else {
+        sidebar.classList.remove('open');
+        drawerBackdrop.classList.remove('active');
+      }
+    }
+
+    // 6. ATTACHMENT (+) MENU & PHOTO ANALYSIS
+    function triggerAttachDialog() {
+      const choice = confirm("Attach Photo/Image for AI Vision analysis?\n\n(Click 'OK' for Photo analysis, or 'Cancel' to Upload documents)");
+      if (choice) {
+        document.getElementById('image-file-input').click();
+      } else {
+        triggerFileInput();
+      }
+    }
+
+    function handleImageAttachment(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      attachedImageFile = file;
+      photoNameText.textContent = file.name;
+      photoBanner.style.display = 'flex';
+      event.target.value = '';
+    }
+
+    function removeAttachedPhoto() {
+      attachedImageFile = null;
+      photoBanner.style.display = 'none';
+    }
+
+    // 7. INPUT RESIZE & SUBMISSION
+    function autoGrowInput(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    }
+
+    function handleInputKeyDown(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSubmitOrStop();
+      }
+    }
+
+    function sendQuickPrompt(promptText) {
+      queryInput.value = promptText;
+      autoGrowInput(queryInput);
+      handleSubmitOrStop();
+    }
+
+    function setQuickMode(modeName) {
+      modeSelect.value = modeName;
+      onModeChanged();
+    }
+
+    function handleSubmitOrStop() {
+      if (isProcessing) {
+        // Trigger Stop
+        if (activeEventSource) {
+          activeEventSource.close();
+          activeEventSource = null;
+        }
+        finishProcessingState();
+        return;
+      }
+
+      const query = queryInput.value.trim();
+      if (!query && !attachedImageFile) return;
+
+      if (attachedImageFile) {
+        sendImageAnalysis(query || "Please analyze this image, solve any question contained within it, and explain key takeaways.");
+      } else {
+        sendTextQuery(query);
+      }
+    }
+
+    function setProcessingState(running) {
+      isProcessing = running;
+      if (running) {
+        progressBar.classList.add('active');
+        searchBtn.classList.add('btn-stop');
+        searchIconSymbol.textContent = '⏹';
+        searchBtnLabel.textContent = 'Stop';
+      } else {
+        progressBar.classList.remove('active');
+        searchBtn.classList.remove('btn-stop');
+        searchIconSymbol.textContent = '🔍';
+        searchBtnLabel.textContent = 'Search';
+      }
+    }
+
+    function finishProcessingState() {
+      setProcessingState(false);
+      saveCurrentSession();
+    }
+
+    // 8. CHAT RENDERING
+    function hideHeroIfVisible() {
+      if (heroCard && heroCard.style.display !== 'none') {
+        heroCard.style.display = 'none';
+      }
+    }
+
+    function addMessageRow(role, content, citations = []) {
+      hideHeroIfVisible();
+
+      const row = document.createElement('div');
+      row.className = `message-row ${role}`;
+
+      const avatar = role === 'ai' ? '🧠' : '👤';
       const author = role === 'ai' ? 'AI Search Studio' : 'You';
 
       let citationsHtml = '';
       if (citations && citations.length > 0) {
         citationsHtml = `
-          <div class="citations-box">
+          <div class="citations-container">
             <div class="citations-title">Sources & Citations:</div>
-            <div class="citations-tags">
-              ${citations.map(c => `<span class="citation-tag">🔗 ${escapeHtml(c)}</span>`).join('')}
+            <div class="citation-pills">
+              ${citations.map(c => `<span class="citation-chip">🔗 ${escapeHtml(c)}</span>`).join('')}
             </div>
           </div>
         `;
@@ -1112,184 +2062,417 @@ HTML_PAGE = """<!doctype html>
       let actionsHtml = '';
       if (role === 'ai') {
         actionsHtml = `
-          <div class="msg-actions">
-            <button class="msg-action-btn" onclick="copyMessageText(this)">📋 Copy</button>
-            <button class="msg-action-btn" onclick="speakMessageText(this)">🔊 Read Aloud</button>
+          <div class="msg-actions-row">
+            <button class="msg-action-btn" onclick="copyMessage(this)">📋 Copy</button>
+            <button class="msg-action-btn" onclick="speakMessage(this)">🔊 Read Aloud</button>
           </div>
         `;
       }
 
-      // Render Markdown for AI, escape text for user
-      const renderedContent = role === 'ai' ? marked.parse(text) : escapeHtml(text).replace(/\n/g, '<br>');
+      const parsedHtml = role === 'ai' ? marked.parse(content) : escapeHtml(content).replace(/\n/g, '<br>');
 
-      card.innerHTML = `
+      row.innerHTML = `
         <div class="msg-avatar ${role}">${avatar}</div>
-        <div class="msg-content-wrapper">
-          <div class="msg-author">${author}</div>
-          <div class="msg-bubble">${renderedContent}${citationsHtml}</div>
+        <div class="msg-body-wrapper">
+          <div class="msg-meta-row">${author}</div>
+          <div class="msg-bubble">${parsedHtml}${citationsHtml}</div>
           ${actionsHtml}
         </div>
       `;
 
-      messagesContainer.appendChild(card);
-      // Highlight code blocks
-      card.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
-      messagesContainer.scrollTop = messagesContainer.scrollHeight;
-      return card;
+      chatViewport.appendChild(row);
+      row.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+      chatViewport.scrollTop = chatViewport.scrollHeight;
+
+      currentMessages.push({ role, content, citations });
+      return row;
     }
 
-    async function sendMessage() {
-      const text = userInput.value.trim();
-      if (!text || isGenerating) return;
+    function addSystemCard(text) {
+      hideHeroIfVisible();
+      const row = document.createElement('div');
+      row.className = 'message-row ai';
+      row.innerHTML = `
+        <div class="msg-avatar ai">⚡</div>
+        <div class="msg-body-wrapper">
+          <div class="msg-bubble" style="background: var(--bg-sidebar); border-left: 3px solid var(--accent-primary);">
+            ${marked.parse(text)}
+          </div>
+        </div>
+      `;
+      chatViewport.appendChild(row);
+      chatViewport.scrollTop = chatViewport.scrollHeight;
+    }
 
-      isGenerating = true;
-      sendBtn.disabled = true;
-      userInput.value = '';
-      userInput.style.height = 'auto';
+    // 9. QUERY DISPATCH & STREAMING
+    async function sendTextQuery(query) {
+      setProcessingState(true);
+      queryInput.value = '';
+      queryInput.style.height = 'auto';
 
-      addMessage('user', text);
-      setStatus('Searching & Reasoning...', 'warning');
+      addMessageRow('user', query);
 
-      // Create AI placeholder card
-      const aiCard = addMessage('ai', '⏳ *Thinking...*');
-      const bubble = aiCard.querySelector('.msg-bubble');
+      // Create streaming placeholder card
+      hideHeroIfVisible();
+      const streamRow = document.createElement('div');
+      streamRow.className = 'message-row ai';
+      streamRow.innerHTML = `
+        <div class="msg-avatar ai">🧠</div>
+        <div class="msg-body-wrapper">
+          <div class="msg-meta-row">AI Search Studio</div>
+          <div class="msg-bubble" id="active-stream-bubble">Thinking...</div>
+          <div class="msg-actions-row" id="active-stream-actions" style="display: none;">
+            <button class="msg-action-btn" onclick="copyMessage(this)">📋 Copy</button>
+            <button class="msg-action-btn" onclick="speakMessage(this)">🔊 Read Aloud</button>
+          </div>
+        </div>
+      `;
+      chatViewport.appendChild(streamRow);
+      chatViewport.scrollTop = chatViewport.scrollHeight;
+
+      const streamBubble = document.getElementById('active-stream-bubble');
+      let streamedTokens = "";
+      let collectedCitations = [];
 
       try {
-        const res = await fetch('/api/chat', {
+        const response = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            query: text,
+            query: query,
             mode: modeSelect.value,
-            model: modelSelect.value
+            model: modelSelect.value,
+            depth: parseInt(depthSlider.value)
           })
         });
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Request failed');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Generation error");
+
+        streamedTokens = data.answer || "No response generated.";
+        collectedCitations = data.citations || [];
 
         let citationsHtml = '';
-        if (data.citations && data.citations.length > 0) {
+        if (collectedCitations.length > 0) {
           citationsHtml = `
-            <div class="citations-box">
+            <div class="citations-container">
               <div class="citations-title">Sources & Citations:</div>
-              <div class="citations-tags">
-                ${data.citations.map(c => `<span class="citation-tag">🔗 ${escapeHtml(c)}</span>`).join('')}
+              <div class="citation-pills">
+                ${collectedCitations.map(c => `<span class="citation-chip">🔗 ${escapeHtml(c)}</span>`).join('')}
               </div>
             </div>
           `;
         }
 
-        bubble.innerHTML = marked.parse(data.answer) + citationsHtml;
-        aiCard.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
-        setStatus('Ready', 'success');
+        streamBubble.innerHTML = marked.parse(streamedTokens) + citationsHtml;
+        streamRow.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+        document.getElementById('active-stream-actions').style.display = 'flex';
+
+        currentMessages.push({ role: 'ai', content: streamedTokens, citations: collectedCitations });
+
+        if (autoTtsEnabled) {
+          speakCleanText(streamedTokens);
+        }
       } catch (err) {
-        bubble.innerHTML = `<span style="color:var(--accent-danger);">❌ Error: ${escapeHtml(err.message)}</span>`;
-        setStatus('Error', 'warning');
+        streamBubble.innerHTML = `<span style="color: var(--accent-danger);">⚠️ Error: ${escapeHtml(err.message)}</span>`;
       } finally {
-        isGenerating = false;
-        sendBtn.disabled = false;
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        streamBubble.removeAttribute('id');
+        const act = document.getElementById('active-stream-actions');
+        if (act) act.removeAttribute('id');
+        finishProcessingState();
       }
     }
 
-    function sendQuickPrompt(prompt) {
-      userInput.value = prompt;
-      autoGrow(userInput);
-      sendMessage();
+    // 10. MULTIMODAL PIXTRAL IMAGE ANALYSIS
+    async function sendImageAnalysis(promptText) {
+      if (!attachedImageFile) return;
+
+      setProcessingState(true);
+      const photoFile = attachedImageFile;
+      removeAttachedPhoto();
+
+      addMessageRow('user', `🖼️ **[Attached Photo: ${escapeHtml(photoFile.name)}]**\n\n${promptText}`);
+
+      const formData = new FormData();
+      formData.append('file', photoFile);
+      formData.append('prompt', promptText);
+
+      try {
+        const res = await fetch('/api/analyze-image', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Image analysis failed");
+
+        addMessageRow('ai', data.answer);
+        if (autoTtsEnabled) speakCleanText(data.answer);
+      } catch (err) {
+        addMessageRow('ai', `⚠️ Image reasoning notice: ${err.message}`);
+      } finally {
+        finishProcessingState();
+      }
     }
 
-    function setModeAndNotify(mode) {
-      modeSelect.value = mode;
-      setStatus(`Mode: ${mode}`, 'success');
-    }
+    // 11. VOICE SPEECH-TO-TEXT (STT) & TEXT-TO-SPEECH (TTS)
+    function toggleVoiceSTT() {
+      const micBtn = document.getElementById('mic-toggle-btn');
+      const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-    function clearChat() {
-      messagesContainer.innerHTML = '';
-      addMessage('ai', '🧹 Chat cleared. What would you like to search or ask next?');
-    }
-
-    // Voice Speech-to-Text (STT) via Web Speech API
-    function toggleSpeechRecognition() {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        alert('Voice input is not supported by this browser. Please try Chrome, Edge, or Safari.');
+      if (!SpeechRec) {
+        alert("Speech Recognition is not supported by your current browser. Please use Chrome, Edge, or Safari.");
         return;
       }
 
-      if (isListening) {
-        recognition.stop();
+      if (isRecordingVoice) {
+        if (recognitionInstance) recognitionInstance.stop();
         return;
       }
 
-      recognition = new SpeechRecognition();
-      recognition.lang = 'en-US';
-      recognition.interimResults = false;
-      recognition.continuous = false;
+      recognitionInstance = new SpeechRec();
+      recognitionInstance.lang = 'en-US';
+      recognitionInstance.interimResults = false;
 
-      recognition.onstart = () => {
-        isListening = true;
-        micBtn.classList.add('listening');
-        setStatus('🎙️ Listening...', 'warning');
+      recognitionInstance.onstart = () => {
+        isRecordingVoice = true;
+        micBtn.classList.add('recording');
+        setStatus("🎙️ Listening... Speak now", "warning");
       };
 
-      recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        userInput.value = transcript;
-        autoGrow(userInput);
-        sendMessage();
+      recognitionInstance.onresult = (e) => {
+        const transcript = e.results[0][0].transcript;
+        queryInput.value = (queryInput.value ? queryInput.value + " " : "") + transcript;
+        autoGrowInput(queryInput);
       };
 
-      recognition.onerror = (event) => {
-        console.warn('Speech recognition error:', event.error);
-        setStatus('Voice error', 'warning');
+      recognitionInstance.onerror = (e) => {
+        console.warn("Speech recognition error:", e.error);
+        setStatus("Voice timeout", "warning");
       };
 
-      recognition.onend = () => {
-        isListening = false;
-        micBtn.classList.remove('listening');
-        setStatus('Ready', 'success');
+      recognitionInstance.onend = () => {
+        isRecordingVoice = false;
+        micBtn.classList.remove('recording');
+        setStatus("Ready", "success");
       };
 
-      recognition.start();
+      recognitionInstance.start();
     }
 
-    // Voice Text-to-Speech (TTS) via Web Speech API
-    function speakMessageText(btn) {
-      if (!('speechSynthesis' in window)) {
-        alert('Text-to-speech is not supported in this browser.');
-        return;
-      }
+    function speakCleanText(rawText) {
+      if (!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
 
-      if (window.speechSynthesis.speaking) {
-        window.speechSynthesis.cancel();
-        btn.textContent = '🔊 Read Aloud';
-        return;
-      }
+      // Clean code blocks, URLs, markdown
+      let clean = rawText.replace(/```[\s\S]*?```/g, 'code block omitted.');
+      clean = clean.replace(/[*#_`~>•\-]/g, ' ');
+      clean = clean.replace(/http\S+/g, '');
+      clean = clean.trim();
+      if (!clean) return;
 
-      const bubble = btn.closest('.msg-content-wrapper').querySelector('.msg-bubble');
-      const text = bubble.innerText;
-      if (!text) return;
+      const utterance = new SpeechSynthesisUtterance(clean.slice(0, 1200));
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
 
-      const utterance = new SpeechSynthesisUtterance(text);
-      btn.textContent = '⏹️ Stop';
-      utterance.onend = () => { btn.textContent = '🔊 Read Aloud'; };
-      utterance.onerror = () => { btn.textContent = '🔊 Read Aloud'; };
+      const voices = window.speechSynthesis.getVoices();
+      const naturalVoice = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Natural') || v.name.includes('Neural') || v.name.includes('Female')));
+      if (naturalVoice) utterance.voice = naturalVoice;
+
       window.speechSynthesis.speak(utterance);
     }
 
-    function copyMessageText(btn) {
-      const bubble = btn.closest('.msg-content-wrapper').querySelector('.msg-bubble');
-      navigator.clipboard.writeText(bubble.innerText).then(() => {
-        const orig = btn.textContent;
-        btn.textContent = '✅ Copied!';
-        setTimeout(() => { btn.textContent = orig; }, 1800);
-      });
+    function speakMessage(btn) {
+      const bubble = btn.closest('.msg-body-wrapper').querySelector('.msg-bubble');
+      speakCleanText(bubble.innerText);
     }
 
-    function escapeHtml(str) {
-      if (!str) return '';
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    function copyMessage(btn) {
+      const bubble = btn.closest('.msg-body-wrapper').querySelector('.msg-bubble');
+      navigator.clipboard.writeText(bubble.innerText);
+      const prev = btn.textContent;
+      btn.textContent = '✅ Copied!';
+      setTimeout(() => { btn.textContent = prev; }, 1500);
+    }
+
+    // 12. SESSIONS & HISTORY MODAL
+    async function openHistoryModal() {
+      document.getElementById('history-modal').classList.add('open');
+      const container = document.getElementById('session-items-list');
+      try {
+        const res = await fetch('/api/sessions');
+        const sessions = await res.json();
+        if (!sessions.length) {
+          container.innerHTML = `<div style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 20px 0;">No conversation history yet.</div>`;
+          return;
+        }
+        container.innerHTML = sessions.map(s => `
+          <div class="session-item-card" onclick="loadSession('${escapeHtml(s.id)}')">
+            <div>
+              <div class="session-title-text">${escapeHtml(s.title || 'Untitled Session')}</div>
+              <div class="session-date-sub">${s.updated_at ? new Date(s.updated_at).toLocaleString() : ''} • ${s.messages ? s.messages.length : 0} msgs</div>
+            </div>
+            <button class="source-del-btn" onclick="deleteSession(event, '${escapeHtml(s.id)}')">🗑️</button>
+          </div>
+        `).join('');
+      } catch (err) {
+        container.innerHTML = `<div style="color: var(--accent-danger); font-size: 11px;">Failed loading history: ${err.message}</div>`;
+      }
+    }
+
+    async function loadSession(id) {
+      try {
+        const res = await fetch(`/api/sessions/${id}`);
+        const data = await res.json();
+        currentSessionId = data.id;
+        currentMessages = [];
+        chatViewport.innerHTML = '';
+
+        if (data.messages && data.messages.length) {
+          data.messages.forEach(m => addMessageRow(m.role, m.content, m.citations || []));
+        } else {
+          showHeroCard();
+        }
+        closeModal('history-modal');
+      } catch (err) {
+        alert("Could not load session: " + err.message);
+      }
+    }
+
+    async function deleteSession(event, id) {
+      event.stopPropagation();
+      if (!confirm("Delete this conversation?")) return;
+      try {
+        await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+        openHistoryModal();
+      } catch (err) {
+        alert("Failed deleting session: " + err.message);
+      }
+    }
+
+    function createNewSession() {
+      currentSessionId = 'session_' + Date.now();
+      currentMessages = [];
+      chatViewport.innerHTML = '';
+      showHeroCard();
+      closeModal('history-modal');
+    }
+
+    async function saveCurrentSession() {
+      if (!currentMessages.length) return;
+      try {
+        await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: currentSessionId,
+            messages: currentMessages
+          })
+        });
+      } catch (e) {
+        console.warn('Session save notice:', e);
+      }
+    }
+
+    function clearCurrentChat() {
+      currentMessages = [];
+      chatViewport.innerHTML = '';
+      showHeroCard();
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    }
+
+    function showHeroCard() {
+      chatViewport.innerHTML = `
+        <div class="hero-container" id="hero-welcome-card">
+          <div class="hero-title">✨ Welcome to Search Studio</div>
+          <div class="hero-subtitle">
+            Your multi-modal RAG knowledge engine. Ask questions from your PDFs, Word documents,<br>code, spreadsheets, or query live web intelligence with voice & image support.
+          </div>
+          <div class="hero-grid">
+            <div class="feature-card">
+              <div class="feature-card-header">📄 Multi-Format Uploads</div>
+              <div class="feature-card-desc">PDF, Word (DOCX), CSV, Excel, TXT, Code & OCR</div>
+            </div>
+            <div class="feature-card">
+              <div class="feature-card-header">⚡ Real-Time Streaming</div>
+              <div class="feature-card-desc">Instant token generation powered by Mistral AI</div>
+            </div>
+            <div class="feature-card">
+              <div class="feature-card-header">🎙️ Two-Way Voice</div>
+              <div class="feature-card-desc">Speech-to-text input and natural voice read-aloud</div>
+            </div>
+            <div class="feature-card">
+              <div class="feature-card-header">🌐 Live Web & Images</div>
+              <div class="feature-card-desc">Automatic search fallbacks and inline image discovery</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // 13. EXPORT MODAL
+    function openExportModal() {
+      document.getElementById('export-modal').classList.add('open');
+    }
+
+    function downloadExport(format) {
+      if (!currentMessages.length) {
+        alert("No chat messages to export yet.");
+        return;
+      }
+
+      let content = "";
+      let filename = `search_studio_${Date.now()}`;
+      let mime = "text/plain";
+
+      if (format === 'markdown') {
+        filename += ".md";
+        mime = "text/markdown";
+        content = `# Search Studio Conversation\nExported: ${new Date().toLocaleString()}\n\n---\n\n`;
+        currentMessages.forEach(m => {
+          content += `### ${m.role === 'ai' ? '🧠 AI Search Studio' : '👤 User'}\n\n${m.content}\n\n`;
+          if (m.citations && m.citations.length) {
+            content += `**Citations:** ${m.citations.join(', ')}\n\n`;
+          }
+          content += `---\n\n`;
+        });
+      } else if (format === 'json') {
+        filename += ".json";
+        mime = "application/json";
+        content = JSON.stringify({ session_id: currentSessionId, messages: currentMessages }, null, 2);
+      } else {
+        filename += ".txt";
+        currentMessages.forEach(m => {
+          content += `[${m.role.toUpperCase()}]: ${m.content}\n\n`;
+        });
+      }
+
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      closeModal('export-modal');
+    }
+
+    // 14. MODAL UTILITIES
+    function openStatsModal() {
+      document.getElementById('stats-modal').classList.add('open');
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('open');
+    }
+
+    function closeModalOnBackdrop(e, id) {
+      if (e.target.id === id) closeModal(id);
+    }
+
+    function escapeHtml(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
     }
   </script>
 </body>
