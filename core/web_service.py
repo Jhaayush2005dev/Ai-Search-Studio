@@ -56,6 +56,11 @@ class WebService:
             self.search_wrapper = DuckDuckGoSearchAPIWrapper(max_results=max_results)
         except Exception:
             self.search_wrapper = None
+        try:
+            import wikipedia
+            wikipedia.set_user_agent("SearchStudioApp/2.0 (contact: support@searchstudio.ai)")
+        except Exception:
+            pass
 
     def resolve_browsing_intent(self, query: str) -> Optional[Tuple[str, str]]:
         """

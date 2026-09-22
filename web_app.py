@@ -21,6 +21,7 @@ from core.doc_loader import UniversalDocumentLoader
 from core.rag_engine import RAGEngine
 from core.session_manager import SessionManager
 from core.vision_service import VisionService
+from core.web_service import WebService
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -36,6 +37,7 @@ _doc_loader = UniversalDocumentLoader()
 _engine = RAGEngine(api_key=MISTRAL_API_KEY)
 _session_manager = SessionManager()
 _vision_service = VisionService(api_key=MISTRAL_API_KEY)
+_web_service = WebService(max_results=4)
 _engine_lock = Lock()
 
 
@@ -77,6 +79,10 @@ class SettingsRequest(BaseModel):
     model: Optional[str] = None
     depth: Optional[int] = None
     temperature: Optional[float] = None
+
+
+class ImageSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
 
 
 # ==========================================
@@ -341,6 +347,29 @@ async def analyze_image(
     except Exception as exc:
         logger.error(f"Image analysis error: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ==========================================
+# WEB IMAGE SEARCH ENDPOINT
+# ==========================================
+@app.post("/api/search-image")
+def search_image_endpoint(req: ImageSearchRequest):
+    try:
+        clean_q = req.query.strip()
+        img, url, err = _web_service.fetch_web_image(clean_q)
+        if url:
+            return {"image_url": url, "query": clean_q, "error": None}
+        elif img:
+            from io import BytesIO
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            return {"image_url": f"data:image/png;base64,{b64}", "query": clean_q, "error": None}
+        else:
+            return {"image_url": None, "query": clean_q, "error": err or "No suitable image found."}
+    except Exception as exc:
+        logger.error(f"Image search endpoint error: {exc}", exc_info=True)
+        return {"image_url": None, "query": req.query, "error": str(exc)}
 
 
 # ==========================================
@@ -1314,6 +1343,7 @@ HTML_PAGE = r"""<!doctype html>
 
     /* Elevated Input Card */
     .input-card-box {
+      position: relative;
       background: var(--bg-input);
       border: 1px solid var(--border-color);
       border-radius: 12px;
@@ -1324,6 +1354,73 @@ HTML_PAGE = r"""<!doctype html>
       transition: border-color 0.2s;
     }
     .input-card-box:focus-within { border-color: var(--accent-primary); }
+
+    /* Floating Attachment Menu (Gemini / ChatGPT Style) */
+    .attachment-popup-menu {
+      position: absolute;
+      bottom: calc(100% + 12px);
+      left: 6px;
+      width: 244px;
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 6px;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      z-index: 1000;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      animation: popupSlideFade 0.16s ease-out;
+    }
+    .attachment-popup-menu.open {
+      display: flex;
+    }
+    @keyframes popupSlideFade {
+      from { opacity: 0; transform: translateY(8px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .attachment-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      height: 38px;
+      padding: 0 12px;
+      border: none;
+      background: transparent;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s, color 0.15s, transform 0.1s;
+    }
+    .attachment-menu-item:hover {
+      background: var(--chip-hover);
+      color: var(--text-primary);
+    }
+    .attachment-menu-item:active {
+      transform: scale(0.98);
+    }
+    .attachment-menu-icon {
+      font-size: 15px;
+      width: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .attachment-menu-label {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
     .btn-input-attach {
       background: transparent;
@@ -1338,10 +1435,49 @@ HTML_PAGE = r"""<!doctype html>
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: background 0.15s, color 0.15s;
+      transition: background 0.15s, color 0.15s, transform 0.15s;
       flex-shrink: 0;
     }
     .btn-input-attach:hover { background: var(--chip-hover); color: var(--text-primary); }
+    .btn-input-attach.open {
+      color: var(--text-primary);
+      background: var(--chip-hover);
+      font-size: 15px;
+    }
+
+    /* Embedded Chat Image Cards */
+    .chat-embedded-image-container {
+      margin-top: 10px;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+      display: inline-block;
+      max-width: 100%;
+      cursor: pointer;
+      background: rgba(0, 0, 0, 0.25);
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .chat-embedded-image-container:hover {
+      border-color: var(--accent-primary);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    }
+    .chat-embedded-image {
+      max-width: 100%;
+      max-height: 380px;
+      display: block;
+      object-fit: cover;
+    }
+    .chat-image-caption {
+      padding: 6px 12px;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--bg-card);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-top: 1px solid var(--border-color);
+    }
 
     .query-textarea {
       flex: 1;
@@ -1682,7 +1818,31 @@ HTML_PAGE = r"""<!doctype html>
 
         <!-- Elevated Input Box -->
         <div class="input-card-box">
-          <button class="btn-input-attach" onclick="triggerAttachDialog()" title="Attach File or Image">+</button>
+          <!-- Floating Attachment Menu Card (Gemini / ChatGPT Style) -->
+          <div class="attachment-popup-menu" id="attachment-popup-menu">
+            <button class="attachment-menu-item" type="button" onclick="triggerAttachmentAction('photo')">
+              <span class="attachment-menu-icon">📷</span>
+              <span class="attachment-menu-label">Photos (Image Analysis)</span>
+            </button>
+            <button class="attachment-menu-item" type="button" onclick="triggerAttachmentAction('files')">
+              <span class="attachment-menu-icon">📄</span>
+              <span class="attachment-menu-label">Upload Files & Docs</span>
+            </button>
+            <button class="attachment-menu-item" type="button" onclick="triggerAttachmentAction('web_image')">
+              <span class="attachment-menu-icon">🌐</span>
+              <span class="attachment-menu-label">Search Web Images</span>
+            </button>
+            <button class="attachment-menu-item" type="button" onclick="triggerAttachmentAction('summarize')">
+              <span class="attachment-menu-icon">📝</span>
+              <span class="attachment-menu-label">Summarize Knowledge</span>
+            </button>
+            <button class="attachment-menu-item" type="button" onclick="triggerAttachmentAction('quiz')">
+              <span class="attachment-menu-icon">🎯</span>
+              <span class="attachment-menu-label">Practice Quiz</span>
+            </button>
+          </div>
+
+          <button class="btn-input-attach" id="btn-attach-menu" onclick="toggleAttachmentMenu(event)" title="Attach or Quick Tools">+</button>
           <textarea id="main-query-input" class="query-textarea" rows="1" placeholder="Ask any question about your documents, code, or search the web..." onkeydown="handleInputKeyDown(event)" oninput="autoGrowInput(this)"></textarea>
           <button class="btn-mic-stt" id="mic-toggle-btn" onclick="toggleVoiceSTT()" title="Voice Dictation">🎙️</button>
           <button class="btn-search-primary" id="btn-submit-search" onclick="handleSubmitOrStop()">
@@ -1796,6 +1956,7 @@ HTML_PAGE = r"""<!doctype html>
     let recognitionInstance = null;
     let isRecordingVoice = false;
     let activeEventSource = null;
+    let activeSourcesList = [];
 
     // Elements
     const sidebar = document.getElementById('sidebar');
@@ -1894,6 +2055,7 @@ HTML_PAGE = r"""<!doctype html>
 
     function renderKnowledgeSources(stats) {
       const sources = stats.sources || [];
+      activeSourcesList = sources;
       fileCountBadge.textContent = `${sources.length} files`;
 
       // Update Top Status Pill
@@ -2035,28 +2197,98 @@ HTML_PAGE = r"""<!doctype html>
       }
     }
 
-    // 6. ATTACHMENT (+) MENU & PHOTO ANALYSIS
-    function triggerAttachDialog() {
-      const choice = confirm("Attach Photo/Image for AI Vision analysis?\n\n(Click 'OK' for Photo analysis, or 'Cancel' to Upload documents)");
-      if (choice) {
-        document.getElementById('image-file-input').click();
+    // 6. FLOATING ATTACHMENT (+) MENU & PHOTO ANALYSIS
+    function toggleAttachmentMenu(event) {
+      if (event) {
+        event.stopPropagation();
+        event.preventDefault();
+      }
+      const menu = document.getElementById('attachment-popup-menu');
+      const btn = document.getElementById('btn-attach-menu');
+      if (!menu || !btn) return;
+
+      const isOpen = menu.classList.contains('open');
+      if (isOpen) {
+        closeAttachmentMenu();
       } else {
-        triggerFileInput();
+        menu.classList.add('open');
+        btn.classList.add('open');
+        btn.textContent = '✕';
       }
     }
+
+    function closeAttachmentMenu() {
+      const menu = document.getElementById('attachment-popup-menu');
+      const btn = document.getElementById('btn-attach-menu');
+      if (menu) menu.classList.remove('open');
+      if (btn) {
+        btn.classList.remove('open');
+        btn.textContent = '+';
+      }
+    }
+
+    function triggerAttachmentAction(action) {
+      closeAttachmentMenu();
+
+      if (action === 'photo') {
+        const input = document.getElementById('image-file-input');
+        if (input) input.click();
+      } else if (action === 'files') {
+        triggerFileInput();
+      } else if (action === 'web_image') {
+        queryInput.value = "Show me a picture of ";
+        autoGrowInput(queryInput);
+        queryInput.focus();
+        const len = queryInput.value.length;
+        try { queryInput.setSelectionRange(len, len); } catch (e) {}
+      } else if (action === 'summarize') {
+        if (!activeSourcesList || activeSourcesList.length === 0) {
+          alert("Please upload files (PDF, Word, TXT, etc.) to use this AI tool.");
+          return;
+        }
+        sendQuickPrompt("Generate a comprehensive executive summary of all uploaded documents.");
+      } else if (action === 'quiz') {
+        if (!activeSourcesList || activeSourcesList.length === 0) {
+          alert("Please upload files (PDF, Word, TXT, etc.) to use this AI tool.");
+          return;
+        }
+        sendQuickPrompt("Generate an interactive 5-question practice quiz with an Answer Key and Explanations based on the loaded documents.");
+      }
+    }
+
+    // Dismiss attachment popup when clicking anywhere outside or pressing Escape
+    document.addEventListener('click', (event) => {
+      const menu = document.getElementById('attachment-popup-menu');
+      const btn = document.getElementById('btn-attach-menu');
+      if (menu && menu.classList.contains('open')) {
+        if (!menu.contains(event.target) && !btn.contains(event.target)) {
+          closeAttachmentMenu();
+        }
+      }
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        closeAttachmentMenu();
+      }
+    });
 
     function handleImageAttachment(event) {
       const file = event.target.files[0];
       if (!file) return;
       attachedImageFile = file;
-      photoNameText.textContent = file.name;
+      const sizeKb = Math.round(file.size / 1024);
+      photoNameText.textContent = `${file.name} (${sizeKb} KB)`;
       photoBanner.style.display = 'flex';
+      queryInput.placeholder = "Ask a question about this image (or click Search to analyze)...";
+      queryInput.focus();
       event.target.value = '';
     }
 
     function removeAttachedPhoto() {
       attachedImageFile = null;
       photoBanner.style.display = 'none';
+      queryInput.placeholder = "Ask any question about your documents, code, or search the web...";
     }
 
     // 7. INPUT RESIZE & SUBMISSION
@@ -2235,6 +2467,14 @@ HTML_PAGE = r"""<!doctype html>
 
     // 9. QUERY DISPATCH & STREAMING
     async function sendTextQuery(query) {
+      // Check if user is searching for web images
+      const lowerQ = query.toLowerCase().trim();
+      const imgTriggers = ["show me a picture of", "show me a photo of", "show me an image of", "show me picture of", "picture of ", "photo of ", "image of ", "diagram of ", "draw ", "generate image"];
+      if (imgTriggers.some(t => lowerQ.startsWith(t))) {
+        executeImageSearch(query);
+        return;
+      }
+
       setProcessingState(true);
       queryInput.value = '';
       queryInput.style.height = 'auto';
@@ -2303,7 +2543,112 @@ HTML_PAGE = r"""<!doctype html>
       }
     }
 
-    // 10. MULTIMODAL PIXTRAL IMAGE ANALYSIS
+    // 10. WEB IMAGE SEARCH DISPATCHER
+    async function executeImageSearch(query) {
+      setProcessingState(true);
+      queryInput.value = '';
+      queryInput.style.height = 'auto';
+
+      addMessageRow('user', query);
+
+      hideHeroIfVisible();
+      const timeStr = formatCurrentTime();
+      const imgCard = document.createElement('div');
+      imgCard.className = 'chat-message-card ai';
+      imgCard.innerHTML = `
+        <div class="card-top-bar">
+          <div class="card-top-left">
+            <span class="card-avatar">⚡ Assistant</span>
+            <span class="card-timestamp">${escapeHtml(timeStr)}</span>
+          </div>
+          <div class="card-top-right" id="active-image-actions" style="display: none;">
+            <button class="card-action-btn" onclick="copyMessage(this)">📋 Copy</button>
+          </div>
+        </div>
+        <div class="card-content" id="active-image-search-content">
+          <span style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary);">
+            <span>🔍</span> Searching web & knowledge sources for image...
+          </span>
+        </div>
+      `;
+      chatViewport.appendChild(imgCard);
+      chatViewport.scrollTop = chatViewport.scrollHeight;
+
+      try {
+        const res = await fetch('/api/search-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query })
+        });
+        const data = await res.json();
+        const contentEl = document.getElementById('active-image-search-content');
+        if (!contentEl) return;
+
+        if (data && data.image_url) {
+          contentEl.innerHTML = `
+            <p>Here is the image found for <strong>${escapeHtml(query)}</strong>:</p>
+            <div class="chat-embedded-image-container" onclick="openImagePreviewModal('${escapeHtml(data.image_url)}', '${escapeHtml(query)}')">
+              <img src="${data.image_url}" alt="${escapeHtml(query)}" class="chat-embedded-image" loading="lazy">
+              <div class="chat-image-caption">
+                <span>🖼️ ${escapeHtml(query)}</span>
+                <span>🔍 Click to expand</span>
+              </div>
+            </div>
+          `;
+          const act = document.getElementById('active-image-actions');
+          if (act) act.style.display = 'flex';
+
+          currentMessages.push({
+            role: 'ai',
+            content: `Here is the image found for **${query}**:\n\n![${query}](${data.image_url})`,
+            timestamp: timeStr,
+            citations: []
+          });
+        } else {
+          contentEl.innerHTML = `<span style="color: var(--text-secondary);">⚠️ ${escapeHtml(data.error || "No suitable image found for this query.")}</span>`;
+          currentMessages.push({
+            role: 'ai',
+            content: `⚠️ ${data.error || "No suitable image found."}`,
+            timestamp: timeStr,
+            citations: []
+          });
+        }
+      } catch (err) {
+        const contentEl = document.getElementById('active-image-search-content');
+        if (contentEl) {
+          contentEl.innerHTML = `<span style="color: var(--accent-danger);">❌ Image search error: ${escapeHtml(err.message)}</span>`;
+        }
+      } finally {
+        const contentEl = document.getElementById('active-image-search-content');
+        if (contentEl) contentEl.removeAttribute('id');
+        const act = document.getElementById('active-image-actions');
+        if (act) act.removeAttribute('id');
+        finishProcessingState();
+      }
+    }
+
+    function openImagePreviewModal(url, title) {
+      const modal = document.getElementById('image-modal');
+      const img = document.getElementById('modal-preview-img');
+      if (!modal || !img) return;
+      img.src = url;
+      const titleEl = modal.querySelector('.modal-title');
+      if (titleEl) titleEl.textContent = title ? `🖼️ ${title}` : '🖼️ Image Preview';
+      modal.classList.add('active');
+    }
+
+    function saveActiveImage() {
+      const img = document.getElementById('modal-preview-img');
+      if (!img || !img.src) return;
+      const a = document.createElement('a');
+      a.href = img.src;
+      a.download = 'search-studio-image.jpg';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    // 11. MULTIMODAL PIXTRAL IMAGE ANALYSIS
     async function sendImageAnalysis(promptText) {
       if (!attachedImageFile) return;
 
@@ -2311,7 +2656,13 @@ HTML_PAGE = r"""<!doctype html>
       const photoFile = attachedImageFile;
       removeAttachedPhoto();
 
-      addMessageRow('user', `🖼️ **[Attached Photo: ${escapeHtml(photoFile.name)}]**\n\n${promptText}`);
+      let photoThumbnailHtml = '';
+      try {
+        const tempUrl = URL.createObjectURL(photoFile);
+        photoThumbnailHtml = `<br><img src="${tempUrl}" style="max-height: 200px; max-width: 100%; border-radius: 8px; margin-top: 8px; border: 1px solid var(--border-color); display: block;" />`;
+      } catch (e) {}
+
+      addMessageRow('user', `🖼️ **[Attached Photo: ${escapeHtml(photoFile.name)}]**${photoThumbnailHtml}\n\n${escapeHtml(promptText)}`);
 
       const formData = new FormData();
       formData.append('file', photoFile);
