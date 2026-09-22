@@ -1,3 +1,4 @@
+import os
 import base64
 import io
 from pathlib import Path
@@ -18,11 +19,13 @@ class VisionService:
     """Multimodal image analysis and visual reasoning service powered by Mistral Pixtral."""
 
     def __init__(self, api_key: str = MISTRAL_API_KEY):
-        self.api_key = api_key
+        self.api_key = api_key or os.getenv("MISTRAL_API_KEY", "")
         self.client = None
+        self._active_key = None
         if self.api_key:
             try:
                 self.client = Mistral(api_key=self.api_key)
+                self._active_key = self.api_key
             except Exception as e:
                 print(f"VisionService Mistral client init warning: {e}")
                 self.client = None
@@ -30,29 +33,19 @@ class VisionService:
     @staticmethod
     def encode_image_to_base64(image_input) -> Tuple[str, str]:
         """
-        Converts a file path or PIL Image to a Base64 encoded string and detects MIME type.
-        Returns: (base64_string, mime_type)
+        Converts a file path, PIL Image, raw bytes, or Data URI / Base64 string
+        to a (base64_string, mime_type) tuple.
         """
-        if isinstance(image_input, (str, Path)):
-            path = Path(image_input)
-            ext = path.suffix.lower()
-            if ext in [".png"]:
-                mime_type = "image/png"
-            elif ext in [".webp"]:
-                mime_type = "image/webp"
-            else:
-                mime_type = "image/jpeg"
-
-            with open(path, "rb") as f:
-                b64_str = base64.b64encode(f.read()).decode("utf-8")
-            return b64_str, mime_type
-
-        elif isinstance(image_input, Image.Image):
+        # Case 1: PIL Image object
+        if isinstance(image_input, Image.Image):
             buffered = io.BytesIO()
             img_format = getattr(image_input, "format", None)
             if img_format == "PNG":
                 mime_type = "image/png"
                 image_input.save(buffered, format="PNG")
+            elif img_format == "WEBP":
+                mime_type = "image/webp"
+                image_input.save(buffered, format="WEBP")
             else:
                 mime_type = "image/jpeg"
                 if image_input.mode in ("RGBA", "P"):
@@ -63,6 +56,66 @@ class VisionService:
 
             b64_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
             return b64_str, mime_type
+
+        # Case 2: Raw bytes or bytearray
+        elif isinstance(image_input, (bytes, bytearray)):
+            buffered = io.BytesIO(image_input)
+            mime_type = "image/jpeg"
+            try:
+                with Image.open(buffered) as pil_img:
+                    fmt = (pil_img.format or "").upper()
+                    if fmt == "PNG":
+                        mime_type = "image/png"
+                    elif fmt == "WEBP":
+                        mime_type = "image/webp"
+                    else:
+                        mime_type = "image/jpeg"
+            except Exception:
+                pass
+            b64_str = base64.b64encode(image_input).decode("utf-8")
+            return b64_str, mime_type
+
+        # Case 3: BytesIO buffer
+        elif isinstance(image_input, io.BytesIO):
+            return VisionService.encode_image_to_base64(image_input.getvalue())
+
+        # Case 4: String or Path
+        elif isinstance(image_input, (str, Path)):
+            input_str = str(image_input).strip()
+
+            # Subcase 4a: Data URI format (e.g. data:image/jpeg;base64,...)
+            if input_str.startswith("data:"):
+                try:
+                    header, b64_part = input_str.split(",", 1)
+                    mime_type = "image/jpeg"
+                    if ":" in header and ";" in header:
+                        extracted = header.split(":", 1)[1].split(";", 1)[0].strip()
+                        if extracted:
+                            mime_type = extracted
+                    return b64_part.strip(), mime_type
+                except Exception:
+                    pass
+
+            # Subcase 4b: Long raw base64 string (>500 chars is not a filepath)
+            if len(input_str) > 500:
+                return input_str, "image/jpeg"
+
+            # Subcase 4c: Real file on disk
+            path = Path(input_str)
+            if path.is_file():
+                ext = path.suffix.lower()
+                if ext in [".png"]:
+                    mime_type = "image/png"
+                elif ext in [".webp"]:
+                    mime_type = "image/webp"
+                else:
+                    mime_type = "image/jpeg"
+
+                with open(path, "rb") as f:
+                    b64_str = base64.b64encode(f.read()).decode("utf-8")
+                return b64_str, mime_type
+            else:
+                raise FileNotFoundError(f"Image file not found: {input_str}")
 
         else:
             raise ValueError(f"Unsupported image input type: {type(image_input)}")
@@ -87,13 +140,17 @@ class VisionService:
             return msg
 
         if not self.api_key:
+            self.api_key = os.getenv("MISTRAL_API_KEY", "")
+
+        if not self.api_key:
             msg = "⚠️ **MISTRAL_API_KEY** not found in `.env`. Please provide an API key to enable image analysis."
             token_callback(msg)
             return msg
 
-        if not self.client:
+        if not self.client or getattr(self, "_active_key", None) != self.api_key:
             try:
                 self.client = Mistral(api_key=self.api_key)
+                self._active_key = self.api_key
             except Exception as e:
                 msg = f"❌ Failed to initialize Mistral client: {e}"
                 token_callback(msg)
@@ -127,13 +184,17 @@ class VisionService:
             prompt_clean = prompt.strip() if prompt else ""
             default_prompts = [
                 "analyze and describe this photo in detail.",
+                "answer and explain this photo in detail.",
                 "analyze this photo",
-                "describe this image"
+                "describe this photo",
+                "describe this image",
+                "please analyze this image, solve any question contained within it, and explain key takeaways.",
+                "analyze this image in detail."
             ]
 
             user_text_parts = [system_instruction]
 
-            if prompt_clean and prompt_clean.lower() not in default_prompts:
+            if prompt_clean and prompt_clean.lower() not in [p.lower() for p in default_prompts]:
                 user_text_parts.append(f"User Request / Question: {prompt_clean}")
             else:
                 user_text_parts.append("Please analyze the image, solve/answer any question or problem contained in it, and provide the complete solution.")

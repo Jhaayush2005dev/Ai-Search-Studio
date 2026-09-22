@@ -327,23 +327,45 @@ async def analyze_image(
     prompt: Optional[str] = Form("Please analyze this image, solve any question contained within it, and explain key takeaways.")
 ):
     try:
+        import asyncio
         contents = await file.read()
-        b64_str = base64.b64encode(contents).decode("utf-8")
-        ext = Path(file.filename).suffix.lower()
-        mime_type = "image/png" if ext == ".png" else "image/jpeg"
+        filename = file.filename or "image.jpg"
 
         current_key = _vision_service.api_key or os.getenv("MISTRAL_API_KEY", "")
         if not current_key:
             raise HTTPException(status_code=500, detail="MISTRAL_API_KEY is not configured for image analysis.")
 
         _vision_service.api_key = current_key
+
+        # Optional RAG context if user supplied a specific query alongside the image
+        search_context = ""
+        clean_p = (prompt or "").strip()
+        default_prompts = [
+            "analyze and describe this photo in detail.",
+            "answer and explain this photo in detail.",
+            "analyze this photo",
+            "describe this photo",
+            "describe this image",
+            "please analyze this image, solve any question contained within it, and explain key takeaways.",
+            "analyze this image in detail."
+        ]
+        if clean_p and clean_p.lower() not in [p.lower() for p in default_prompts]:
+            try:
+                retrieved_text, _ = _engine.retrieve_context_for_query(clean_p)
+                if retrieved_text:
+                    search_context = retrieved_text
+            except Exception as e:
+                logger.warning(f"RAG context retrieval for image query skipped: {e}")
+
         answer_parts = []
-        _vision_service.analyze_image_stream(
-            image_input=f"data:{mime_type};base64,{b64_str}",
+        await asyncio.to_thread(
+            _vision_service.analyze_image_stream,
+            image_input=contents,
             prompt=prompt or "Analyze this image in detail.",
-            token_callback=answer_parts.append
+            token_callback=answer_parts.append,
+            search_context=search_context
         )
-        return {"answer": "".join(answer_parts), "filename": file.filename}
+        return {"answer": "".join(answer_parts), "filename": filename}
     except Exception as exc:
         logger.error(f"Image analysis error: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
